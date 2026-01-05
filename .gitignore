@@ -32,11 +32,11 @@ htmlcov/
 pytest-cache-files-*/
 
 # Runtime artifacts (local state)
-logs/
-data/ledger/
-data/state/
-data/test_ledgers/
-archive/
+/logs/
+/data/ledger/
+/data/state/
+/data/test_ledgers/
+/archive/
 
 # OS / editor
 .DS_Store

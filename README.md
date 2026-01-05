@@ -44,6 +44,18 @@ Run a simple backtest from CSV market data:
 backtest --symbol BTCUSDT --interval 4h --data-path ./data/market
 ```
 
+Write report artifacts:
+
+```bash
+backtest --symbol BTCUSDT --out-dir ./data/backtests/BTCUSDT
+```
+
+Download historical klines (free Binance data):
+
+```bash
+python -m src.tools.download_klines --symbol BTCUSDT --interval 4h --start 2024-01-01
+```
+
 ## Reset (local)
 
 To reset local runtime state/logs (does not affect Binance orders/positions), stop the bot and delete:
