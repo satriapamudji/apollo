@@ -1,0 +1,45 @@
+# Secrets
+.env
+
+# Git internals (Codex/Windows workaround)
+.repo/
+.gitx/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Build artifacts
+build/
+dist/
+
+# Test / coverage / lint caches
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytest_tmp*/
+pytest-cache-files-*/
+
+# Runtime artifacts (local state)
+logs/
+data/ledger/
+data/state/
+data/test_ledgers/
+archive/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

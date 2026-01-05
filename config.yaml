@@ -1,0 +1,78 @@
+environment: testnet
+run:
+  mode: paper
+  enable_trading: false
+  live_confirm: ""
+binance:
+  base_url: https://fapi.binance.com
+  ws_url: wss://fstream.binance.com
+  recv_window: 5000
+  user_stream_enabled: true
+  user_stream_keepalive_sec: 1800
+strategy:
+  name: trend_following_v1
+  trend_timeframe: 1d
+  entry_timeframe: 4h
+  indicators:
+    ema_fast: 8
+    ema_slow: 21
+    atr_period: 14
+  entry:
+    style: breakout
+    score_threshold: 0.55
+  exit:
+    atr_stop_multiplier: 2.0
+    trailing_start_atr: 1.5
+    trailing_distance_atr: 1.5
+    time_stop_days: 7
+risk:
+  risk_per_trade_pct: 0.75
+  max_leverage: 5
+  default_leverage: 2
+  max_daily_loss_pct: 3.0
+  max_drawdown_pct: 10.0
+  max_consecutive_losses: 3
+  max_loss_streak_24h: 5
+  loss_streak_window_hours: 24
+  max_positions: 1
+universe:
+  min_quote_volume_usd: 50000000
+  size: 5
+news:
+  enabled: true
+  poll_interval_minutes: 15
+  max_age_hours: 24
+  high_risk_block_hours: 24
+  medium_risk_block_hours: 6
+  sources:
+  - url: https://www.coindesk.com/arc/outboundfeeds/rss/
+    name: coindesk
+    enabled: true
+llm:
+  provider: openai
+  model: gpt-4-turbo-preview
+  max_tokens: 500
+  temperature: 0.1
+  rate_limit_per_minute: 10
+execution:
+  max_slippage_pct: 0.5
+  limit_order_buffer_pct: 0.05
+  max_spread_pct: 0.3
+  retry_attempts: 3
+  retry_initial_delay_ms: 1000
+  retry_max_delay_ms: 10000
+  order_timeout_sec: 30
+  margin_type: ISOLATED
+  position_mode: ONE_WAY
+storage:
+  ledger_path: ./data/ledger
+  state_path: ./data/state
+  logs_path: ./logs
+  data_path: ./data/market
+monitoring:
+  metrics_port: 9090
+  log_level: INFO
+  alert_webhooks: []
+  log_http: false
+  log_http_responses: false
+  log_http_max_body_chars: 1000
