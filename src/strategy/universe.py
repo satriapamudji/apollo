@@ -9,6 +9,8 @@ import structlog
 
 from src.config.settings import RiskConfig, UniverseConfig
 from src.connectors.rest_client import BinanceRestClient
+from src.ledger.bus import EventBus
+from src.ledger.events import EventType
 
 if TYPE_CHECKING:
     from src.risk.sizing import SymbolFilters
@@ -60,11 +62,13 @@ class UniverseSelector:
         config: UniverseConfig,
         risk_config: RiskConfig | None = None,
         equity: float = 0.0,
+        event_bus: EventBus | None = None,
     ) -> None:
         self.rest = rest
         self.config = config
         self.risk_config = risk_config
         self.equity = equity
+        self.event_bus = event_bus
 
     def set_equity(self, equity: float) -> None:
         """Update the current account equity for tradeability filtering."""
@@ -127,18 +131,19 @@ class UniverseSelector:
 
             # Check if account can trade this symbol
             if self.equity > 0 and min_equity > self.equity:
-                filtered.append(
-                    FilteredSymbol(
-                        symbol=symbol,
-                        reason=self._get_filter_reason(symbol_filters, mark_price, min_equity),
-                        min_equity_required=min_equity,
-                        current_equity=self.equity,
-                        mark_price=mark_price,
-                        min_qty=symbol_filters.min_qty,
-                        min_notional=symbol_filters.min_notional,
-                        step_size=symbol_filters.step_size,
-                    )
+                filtered_symbol = FilteredSymbol(
+                    symbol=symbol,
+                    reason=self._get_filter_reason(symbol_filters, mark_price, min_equity),
+                    min_equity_required=min_equity,
+                    current_equity=self.equity,
+                    mark_price=mark_price,
+                    min_qty=symbol_filters.min_qty,
+                    min_notional=symbol_filters.min_notional,
+                    step_size=symbol_filters.step_size,
                 )
+                filtered.append(filtered_symbol)
+                # Emit ledger event for filtering
+                await self._emit_filter_event(filtered_symbol)
                 log.info(
                     "symbol_filtered_tradeability",
                     symbol=symbol,
@@ -265,3 +270,66 @@ class UniverseSelector:
             if flt.get("filterType") == filter_type:
                 return float(flt.get("notional", flt.get("minNotional", 0)))
         return None
+
+    async def _emit_filter_event(self, filtered: FilteredSymbol) -> None:
+        """Emit a SYMBOL_FILTERED event when a symbol is filtered out."""
+        if self.event_bus is None:
+            return
+        try:
+            await self.event_bus.publish(
+                EventType.SYMBOL_FILTERED,
+                {
+                    "symbol": filtered.symbol,
+                    "reason": filtered.reason,
+                    "min_equity_required": filtered.min_equity_required,
+                    "current_equity": filtered.current_equity,
+                    "mark_price": filtered.mark_price,
+                    "min_qty": filtered.min_qty,
+                    "min_notional": filtered.min_notional,
+                    "step_size": filtered.step_size,
+                },
+                {"source": "universe_selector"},
+            )
+        except Exception:
+            log.exception("failed_to_emit_symbol_filtered_event", symbol=filtered.symbol)
+
+    async def emit_funding_update(self, symbol: str, funding_rate: float, mark_price: float) -> None:
+        """Emit a FUNDING_UPDATE event for a symbol.
+
+        This is called on the 8-hour funding schedule to record the current
+        funding rate and estimated carry for ledger reconstruction.
+        """
+        if self.event_bus is None:
+            return
+        try:
+            # Calculate estimated carry for different position sizes
+            # Carry per 8 hours = position_value * funding_rate
+            carry_1k = 1000 * funding_rate  # $1k position
+            carry_10k = 10000 * funding_rate  # $10k position
+            carry_100k = 100000 * funding_rate  # $100k position
+
+            await self.event_bus.publish(
+                EventType.FUNDING_UPDATE,
+                {
+                    "symbol": symbol,
+                    "funding_rate": funding_rate,
+                    "funding_rate_pct": funding_rate * 100,
+                    "mark_price": mark_price,
+                    "estimated_carry_1k": carry_1k,
+                    "estimated_carry_10k": carry_10k,
+                    "estimated_carry_100k": carry_100k,
+                    "estimated_daily_carry_1k": carry_1k * 3,  # 3 funding periods per day
+                    "estimated_daily_carry_10k": carry_10k * 3,
+                    "estimated_daily_carry_100k": carry_100k * 3,
+                },
+                {"source": "universe_selector"},
+            )
+            log.info(
+                "funding_update_emitted",
+                symbol=symbol,
+                funding_rate=funding_rate,
+                funding_rate_pct=f"{funding_rate * 100:.4f}%",
+                mark_price=mark_price,
+            )
+        except Exception:
+            log.exception("failed_to_emit_funding_update", symbol=symbol)

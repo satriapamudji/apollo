@@ -22,6 +22,7 @@ def compute_metrics(result: BacktestResult) -> dict[str, Any]:
     - Avg R-multiple: average risk-reward achieved
     - Max consecutive losses
     - Monthly returns table
+    - Funding metrics: total funding paid, PnL with/without funding
     """
     trades = result.trades
     metrics: dict[str, Any] = {
@@ -34,6 +35,10 @@ def compute_metrics(result: BacktestResult) -> dict[str, Any]:
         "win_rate_pct": round(result.win_rate * 100, 2),
         "max_drawdown": result.max_drawdown,
         "max_drawdown_pct": round(result.max_drawdown * 100, 2),
+        # Funding metrics
+        "total_funding_paid": result.total_funding_paid,
+        "pnl_with_funding": result.pnl_with_funding,
+        "pnl_without_funding": result.total_return * result.initial_equity + result.total_funding_paid,
     }
 
     if not trades:
@@ -143,6 +148,8 @@ def write_trade_csv(trades: list[Trade], path: Path) -> None:
         "quantity",
         "gross_pnl",
         "net_pnl",
+        "funding_cost",
+        "pnl_without_funding",
         "holding_hours",
     ]
 
@@ -150,6 +157,7 @@ def write_trade_csv(trades: list[Trade], path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for trade in trades:
+            pnl_without_funding = trade.net_pnl + trade.funding_cost
             writer.writerow({
                 "trade_id": trade.trade_id,
                 "symbol": trade.symbol,
@@ -161,6 +169,8 @@ def write_trade_csv(trades: list[Trade], path: Path) -> None:
                 "quantity": trade.quantity,
                 "gross_pnl": round(trade.gross_pnl, 6),
                 "net_pnl": round(trade.net_pnl, 6),
+                "funding_cost": round(trade.funding_cost, 6),
+                "pnl_without_funding": round(pnl_without_funding, 6),
                 "holding_hours": round(trade.holding_hours, 2),
             })
 
@@ -197,6 +207,16 @@ def print_summary(metrics: dict[str, Any]) -> None:
     print(f"  Total Return:       {metrics['total_return_pct']:>10.2f}%")
     print(f"  Final Equity:       {metrics['final_equity']:>10.2f}")
     print(f"  Max Drawdown:       {metrics['max_drawdown_pct']:>10.2f}%")
+
+    # Funding breakdown
+    total_funding = metrics.get('total_funding_paid', 0.0)
+    pnl_with_funding = metrics.get('pnl_with_funding', metrics['total_return'] * metrics['initial_equity'])
+    pnl_without_funding = metrics.get('pnl_without_funding', pnl_with_funding - total_funding)
+
+    print(f"\n{'FUNDING BREAKDOWN':=^40}")
+    print(f"  PnL (no funding):   {pnl_without_funding:>10.2f}")
+    print(f"  Total Funding Paid: ({abs(total_funding):>10.2f})" if total_funding >= 0 else f"  Total Funding Paid:  {abs(total_funding):>10.2f}")
+    print(f"  PnL (with funding): {pnl_with_funding:>10.2f}")
 
     print(f"\n{'TRADES':=^40}")
     print(f"  Total Trades:       {metrics['total_trades']:>10}")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from src.backtester.data import load_symbol_interval
+from src.backtester.data import load_funding_csv, load_symbol_interval
 from src.backtester.engine import Backtester
 from src.backtester.reporting import compute_metrics, generate_report, print_summary
 from src.config.settings import load_settings
@@ -33,7 +33,20 @@ def main() -> None:
         "--slippage-pct",
         type=float,
         default=0.0005,
-        help="Slippage percentage (default: 0.0005 = 0.05%%)",
+        help="Slippage percentage for ideal execution (default: 0.0005 = 0.05%%)",
+    )
+    parser.add_argument(
+        "--execution-model",
+        type=str,
+        choices=["ideal", "realistic"],
+        default="realistic",
+        help="Execution model: 'ideal' (fixed slippage) or 'realistic' (variable slippage, fill probability)",
+    )
+    parser.add_argument(
+        "--random-seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility (only used in realistic mode)",
     )
     parser.add_argument(
         "--out-dir",
@@ -41,10 +54,27 @@ def main() -> None:
         default=None,
         help="Output directory for report artifacts (trades.csv, equity.csv, summary.json)",
     )
+    parser.add_argument(
+        "--funding-data",
+        type=str,
+        default=None,
+        help="Path to funding data directory (default: ./data)",
+    )
+    parser.add_argument(
+        "--constant-funding-rate",
+        type=float,
+        default=None,
+        help="Constant funding rate for stress testing (e.g., 0.0001 = 0.01%%)",
+    )
     args = parser.parse_args()
 
     settings = load_settings(args.config)
     data = load_symbol_interval(args.data_path, args.symbol, args.interval)
+
+    # Load funding data if provided
+    funding_data = None
+    if args.funding_data:
+        funding_data = load_funding_csv(args.symbol, args.funding_data)
 
     backtester = Backtester(
         strategy_config=settings.strategy,
@@ -52,8 +82,16 @@ def main() -> None:
         initial_equity=args.initial_equity,
         fee_pct=args.fee_pct,
         slippage_pct=args.slippage_pct,
+        execution_model=args.execution_model,
+        random_seed=args.random_seed,
+        regime_config=settings.regime,
     )
-    result = backtester.run(args.symbol, data)
+    result = backtester.run(
+        args.symbol,
+        data,
+        funding_data=funding_data,
+        constant_funding_rate=args.constant_funding_rate,
+    )
 
     if args.out_dir:
         # Generate full report with file outputs

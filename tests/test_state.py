@@ -40,8 +40,10 @@ def test_news_normalization_applies_to_pair() -> None:
         sequence_num=1,
         payload={
             "symbols_mentioned": ["BTC"],
+            "exchanges_mentioned": [],
             "risk_level": "HIGH",
             "risk_reason": "test",
+            "matched_rules": ["hack_exploit"],
             "confidence": 0.9,
         },
     )

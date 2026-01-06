@@ -25,14 +25,16 @@ class BinanceConfig(BaseModel):
     recv_window: int = Field(default=5000, ge=1000, le=60000)
     user_stream_enabled: bool = True
     user_stream_keepalive_sec: int = Field(default=30 * 60, ge=60, le=60 * 60)
+    use_production_market_data: bool = False
+    market_data_base_url: str = "https://fapi.binance.com"
+    market_data_ws_url: str = "wss://fstream.binance.com"
+    time_sync_interval_sec: int = Field(default=60, ge=30, le=3600)
 
 
 class RunConfig(BaseModel):
     """Runtime trading mode configuration."""
 
-    mode: Literal["paper", "testnet", "live"] = Field(
-        default="paper", validation_alias="RUN_MODE"
-    )
+    mode: Literal["paper", "testnet", "live"] = Field(default="paper", validation_alias="RUN_MODE")
     enable_trading: bool = Field(default=False, validation_alias="RUN_ENABLE_TRADING")
     live_confirm: str = Field(default="", validation_alias="RUN_LIVE_CONFIRM")
 
@@ -48,6 +50,11 @@ class IndicatorConfig(BaseModel):
     ema_slow: int = Field(default=21, ge=5, le=100)
     atr_period: int = Field(default=14, ge=5, le=50)
     rsi_period: int = Field(default=14, ge=5, le=50)
+    # Regime detection indicators
+    adx_period: int = Field(default=14, ge=5, le=50)
+    chop_period: int = Field(default=14, ge=5, le=50)
+    # Volume indicators
+    volume_sma_period: int = Field(default=20, ge=5, le=50)
 
 
 class EntryConfig(BaseModel):
@@ -55,6 +62,10 @@ class EntryConfig(BaseModel):
 
     style: Literal["pullback", "breakout"] = "pullback"
     score_threshold: float = Field(default=0.65, ge=0.3, le=0.95)
+    max_breakout_extension_atr: float = Field(default=1.5, ge=0.5, le=5.0)
+    # Volume confirmation settings
+    volume_breakout_threshold: float = Field(default=1.5, ge=1.0, le=5.0)
+    volume_confirmation_enabled: bool = Field(default=True)
 
 
 class ExitConfig(BaseModel):
@@ -67,6 +78,38 @@ class ExitConfig(BaseModel):
     time_stop_min_profit_atr: float = Field(default=0.5, ge=0.0, le=2.0)
 
 
+class FactorWeightsConfig(BaseModel):
+    """Weight configuration for scoring factors."""
+
+    trend: float = Field(default=0.35, ge=0.0, le=1.0)
+    volatility: float = Field(default=0.15, ge=0.0, le=1.0)
+    entry_quality: float = Field(default=0.25, ge=0.0, le=1.0)
+    funding: float = Field(default=0.10, ge=0.0, le=1.0)
+    news: float = Field(default=0.15, ge=0.0, le=1.0)
+    liquidity: float = Field(default=0.0, ge=0.0, le=1.0)
+    volume: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @property
+    def total(self) -> float:
+        return (
+            self.trend
+            + self.volatility
+            + self.entry_quality
+            + self.funding
+            + self.news
+            + self.liquidity
+            + self.volume
+        )
+
+
+class ScoringConfig(BaseModel):
+    """Scoring engine configuration."""
+
+    enabled: bool = True
+    threshold: float = Field(default=0.55, ge=0.3, le=0.95)
+    factors: FactorWeightsConfig = Field(default_factory=FactorWeightsConfig)
+
+
 class StrategyConfig(BaseModel):
     """Strategy configuration."""
 
@@ -76,6 +119,7 @@ class StrategyConfig(BaseModel):
     indicators: IndicatorConfig = Field(default_factory=IndicatorConfig)
     entry: EntryConfig = Field(default_factory=EntryConfig)
     exit: ExitConfig = Field(default_factory=ExitConfig)
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
 
 
 class RiskConfig(BaseModel):
@@ -121,14 +165,46 @@ class NewsSourceConfig(BaseModel):
 
 
 class NewsConfig(BaseModel):
-    """News ingestion configuration."""
+    """News ingestion + classification configuration."""
 
     enabled: bool = True
+    # Deterministic by default. Use "llm" only when explicitly enabled.
+    classifier_provider: Literal["rules", "llm"] = "rules"
     poll_interval_minutes: int = Field(default=15, ge=5, le=60)
     max_age_hours: int = Field(default=24, ge=1, le=72)
     high_risk_block_hours: int = Field(default=24, ge=6, le=72)
     medium_risk_block_hours: int = Field(default=6, ge=1, le=24)
     sources: list[NewsSourceConfig] = Field(default_factory=list)
+
+
+class RegimeConfig(BaseModel):
+    """Market regime detection configuration."""
+
+    enabled: bool = True
+    adx_trending_threshold: float = Field(default=25.0, ge=10.0, le=50.0)
+    adx_ranging_threshold: float = Field(default=20.0, ge=5.0, le=40.0)
+    chop_trending_threshold: float = Field(default=50.0, ge=30.0, le=60.0)
+    chop_ranging_threshold: float = Field(default=61.8, ge=50.0, le=80.0)
+    transitional_size_multiplier: float = Field(default=0.5, ge=0.1, le=1.0)
+    volatility_regime_enabled: bool = False
+    volatility_contraction_threshold: float = Field(default=0.5, ge=0.1, le=1.0)
+    volatility_expansion_threshold: float = Field(default=2.0, ge=1.0, le=5.0)
+
+
+class CrowdingConfig(BaseModel):
+    """Crowding and regime data configuration for free Binance public data."""
+
+    enabled: bool = True
+    # Thresholds for crowding detection
+    long_short_extreme: float = Field(default=0.8, ge=0.5, le=0.99)
+    oi_expansion_threshold: float = Field(default=0.1, ge=0.0, le=0.5)
+    taker_imbalance_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    # Windows for volatility computation
+    funding_volatility_window: int = Field(default=8, ge=2, le=50)
+    oi_window: int = Field(default=3, ge=2, le=10)
+    # Cache settings
+    cache_dir: str = "./data/crowding"
+    cache_max_entries: int = Field(default=1000, ge=100, le=10000)
 
 
 class LLMConfig(BaseModel):
@@ -153,6 +229,137 @@ class ExecutionConfig(BaseModel):
     order_timeout_sec: int = Field(default=30, ge=10, le=300)
     margin_type: Literal["ISOLATED", "CROSSED"] = "ISOLATED"
     position_mode: Literal["ONE_WAY", "HEDGE"] = "ONE_WAY"
+    # Dynamic spread threshold settings (ATR-based)
+    use_dynamic_spread_threshold: bool = Field(
+        default=True,
+        description="Use ATR-based dynamic spread thresholds instead of fixed max_spread_pct",
+    )
+    spread_threshold_calm_pct: float = Field(
+        default=0.05,
+        ge=0.01,
+        le=0.5,
+        description="Max spread when ATR < atr_calm_threshold (calm market)",
+    )
+    spread_threshold_normal_pct: float = Field(
+        default=0.10,
+        ge=0.02,
+        le=0.5,
+        description="Max spread when ATR between calm and volatile thresholds",
+    )
+    spread_threshold_volatile_pct: float = Field(
+        default=0.20,
+        ge=0.05,
+        le=1.0,
+        description="Max spread when ATR > atr_volatile_threshold (volatile market)",
+    )
+    atr_calm_threshold: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=5.0,
+        description="ATR percentage threshold below which market is considered calm",
+    )
+    atr_volatile_threshold: float = Field(
+        default=4.0,
+        ge=1.0,
+        le=10.0,
+        description="ATR percentage threshold above which market is considered volatile",
+    )
+    # Entry order lifecycle settings
+    entry_timeout_mode: Literal["fixed", "timeframe", "unlimited"] = Field(
+        default="timeframe",
+        description="Timeout mode: 'fixed' (30s default), 'timeframe' (until next candle), 'unlimited' (GTC)",
+    )
+    entry_fallback_timeout_sec: int = Field(
+        default=60,
+        ge=10,
+        le=600,
+        description="Fallback timeout in seconds for 'timeframe' mode if next candle takes too long",
+    )
+    entry_max_duration_sec: int = Field(
+        default=3600,
+        ge=60,
+        le=14400,
+        description="Max duration for 'unlimited' mode before forcing expiration",
+    )
+    entry_expired_action: Literal["cancel", "convert_market", "convert_stop"] = Field(
+        default="cancel",
+        description="Action when order expires: 'cancel' (let signal retry next candle), 'convert_market' (market order), 'convert_stop' (stop-market entry)",
+    )
+    entry_lifecycle_enabled: bool = Field(
+        default=True,
+        description="Enable order lifecycle tracking across strategy cycles",
+    )
+
+
+class BacktestConfig(BaseModel):
+    """Backtesting configuration."""
+
+    execution_model: Literal["ideal", "realistic"] = Field(
+        default="ideal",
+        description="Execution model: 'ideal' (fixed slippage) or 'realistic' (variable slippage, fill probability)",
+    )
+    slippage_base_bps: float = Field(default=2.0, ge=0.0, le=20.0)
+    slippage_atr_scale: float = Field(default=1.0, ge=0.0, le=5.0)
+    fill_probability_model: bool = Field(default=True)
+    random_seed: int | None = Field(default=None, ge=0)
+
+
+class PaperSimConfig(BaseModel):
+    """Paper mode execution simulation configuration.
+
+    Controls realistic fill behavior in paper mode including slippage,
+    fill probability, and fee calculations.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable realistic execution simulation in paper mode",
+    )
+    slippage_base_bps: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=20.0,
+        description="Base slippage in basis points (2 bps = 0.02%)",
+    )
+    slippage_atr_scale: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=5.0,
+        description="Scaling factor for ATR-based slippage component",
+    )
+    maker_fee_pct: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=0.5,
+        description="Maker fee percentage (0.02 = 0.02%)",
+    )
+    taker_fee_pct: float = Field(
+        default=0.04,
+        ge=0.0,
+        le=0.5,
+        description="Taker fee percentage (0.04 = 0.04%)",
+    )
+    random_seed: int | None = Field(
+        default=None,
+        ge=0,
+        description="Random seed for reproducible simulation results",
+    )
+    partial_fill_rate: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Probability of partial fills when order fills (0.20 = 20%)",
+    )
+    use_live_book_ticker: bool = Field(
+        default=True,
+        description="Fetch real bookTicker data for spread calculations",
+    )
+    book_ticker_cache_seconds: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=60.0,
+        description="Cache duration for bookTicker data in seconds",
+    )
 
 
 class StorageConfig(BaseModel):
@@ -168,11 +375,28 @@ class MonitoringConfig(BaseModel):
     """Monitoring and alerting configuration."""
 
     metrics_port: int = Field(default=9090, ge=1024, le=65535)
+    api_port: int = Field(default=8000, ge=1024, le=65535)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     alert_webhooks: list[str] = Field(default_factory=list)
     log_http: bool = False
     log_http_responses: bool = False
     log_http_max_body_chars: int = Field(default=500, ge=0, le=5000)
+
+
+class ReconciliationConfig(BaseModel):
+    """Continuous reconciliation loop configuration."""
+
+    enabled: bool = True
+    interval_minutes: int = Field(default=30, ge=5, le=1440)
+    failure_threshold: int = Field(default=3, ge=1, le=10)
+
+
+class WatchdogConfig(BaseModel):
+    """Protective order watchdog configuration."""
+
+    enabled: bool = Field(default=True)
+    interval_sec: int = Field(default=300, ge=30, le=3600)
+    auto_recover: bool = Field(default=True)
 
 
 class Settings(BaseSettings):
@@ -195,10 +419,16 @@ class Settings(BaseSettings):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
+    regime: RegimeConfig = Field(default_factory=RegimeConfig)
+    crowding: CrowdingConfig = Field(default_factory=CrowdingConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    paper_sim: PaperSimConfig = Field(default_factory=PaperSimConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
+    watchdog: WatchdogConfig = Field(default_factory=WatchdogConfig)
 
     model_config = {
         "env_file": ".env",
@@ -229,6 +459,17 @@ class Settings(BaseSettings):
         if self.environment == "testnet":
             return self.binance.testnet_ws_url
         return self.binance.ws_url
+
+    @property
+    def binance_market_data_base_url(self) -> str:
+        """Get the appropriate market data base URL.
+
+        Returns production market data URL if use_production_market_data is enabled,
+        otherwise returns the trading URL for the current environment.
+        """
+        if self.binance.use_production_market_data:
+            return self.binance.market_data_base_url
+        return self.binance_base_url
 
     @property
     def active_binance_api_key(self) -> str:
@@ -319,7 +560,7 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
 
     config_file = Path(config_path)
     if config_file.exists():
-        with open(config_file, "r") as f:
+        with open(config_file) as f:
             config_data = yaml.safe_load(f) or {}
 
     run_overrides = {}
@@ -392,6 +633,7 @@ def create_default_config(path: str | Path = "config.yaml") -> None:
         },
         "news": {
             "enabled": True,
+            "classifier_provider": "rules",
             "poll_interval_minutes": 15,
             "max_age_hours": 24,
             "high_risk_block_hours": 24,
@@ -435,6 +677,11 @@ def create_default_config(path: str | Path = "config.yaml") -> None:
             "log_http": False,
             "log_http_responses": False,
             "log_http_max_body_chars": 500,
+        },
+        "reconciliation": {
+            "enabled": True,
+            "interval_minutes": 30,
+            "failure_threshold": 3,
         },
     }
 

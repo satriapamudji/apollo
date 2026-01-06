@@ -25,6 +25,7 @@ class EventType(str, Enum):
     RISK_REJECTED = "RiskRejected"
     ORDER_PLACED = "OrderPlaced"
     ORDER_CANCELLED = "OrderCancelled"
+    ORDER_EXPIRED = "OrderExpired"
     ORDER_FILLED = "OrderFilled"
     ORDER_PARTIAL_FILL = "OrderPartialFill"
     POSITION_OPENED = "PositionOpened"
@@ -39,6 +40,10 @@ class EventType(str, Enum):
     SYSTEM_STARTED = "SystemStarted"
     SYSTEM_STOPPED = "SystemStopped"
     RECONCILIATION_COMPLETED = "ReconciliationCompleted"
+    PROTECTIVE_ORDERS_VERIFIED = "ProtectiveOrdersVerified"
+    PROTECTIVE_ORDERS_MISSING = "ProtectiveOrdersMissing"
+    PROTECTIVE_ORDERS_REPLACED = "ProtectiveOrdersReplaced"
+    TRADE_CYCLE_COMPLETED = "TradeCycleCompleted"
 
 
 def utc_now() -> datetime:

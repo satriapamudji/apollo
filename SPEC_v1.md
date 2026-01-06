@@ -1,4 +1,4 @@
-# AI-Assisted Binance USDⓈ-M Perpetual Futures Trend-Following Bot
+# AI-Assisted Binance USD-M Perpetual Futures Trend-Following Bot
 
 ## Technical Specification v1.0
 
@@ -28,7 +28,7 @@
 
 ## 1. Overview
 
-This system is an AI-assisted automated trading bot for Binance USDⓈ-M perpetual futures contracts, designed for multi-day trend-following positions (2-7 day holding periods) with a $100 starting equity constraint. The architecture strictly separates "thinking" (LLM-powered analysis and classification) from "doing" (deterministic risk management and execution), ensuring that an AI model can propose and classify but never directly place orders. The system uses event sourcing for full auditability and restart safety, implements hard-coded risk limits that cannot be overridden at runtime, and reconciles state on every startup to handle manual interventions or unexpected shutdowns gracefully.
+This system is an AI-assisted automated trading bot for Binance USD-M perpetual futures contracts, designed for multi-day trend-following positions (2-7 day holding periods) with a $100 starting equity constraint. The architecture strictly separates "thinking" (LLM-powered analysis and classification) from "doing" (deterministic risk management and execution), ensuring that an AI model can propose and classify but never directly place orders. The system uses event sourcing for full auditability and restart safety, implements hard-coded risk limits that cannot be overridden at runtime, and reconciles state on every startup to handle manual interventions or unexpected shutdowns gracefully.
 
 **What "AI-Assisted" means:** The LLM component acts as a news classifier and risk modifier—it reads RSS feeds, extracts relevant entities, classifies sentiment/event-type, and outputs structured JSON recommendations. These recommendations modulate the scoring engine and risk parameters but do not bypass deterministic risk gates. The LLM never places orders, modifies position sizes beyond bounds, or changes core trading rules.
 
@@ -40,7 +40,7 @@ This system is an AI-assisted automated trading bot for Binance USDⓈ-M perpetu
 
 | ID | Goal | Constraint |
 |----|------|------------|
-| G1 | Execute multi-day trend-following trades on USDⓈ-M perps | 2-7 day holding period |
+| G1 | Execute multi-day trend-following trades on USD-M perps | 2-7 day holding period |
 | G2 | Operate safely with $100 starting equity | Max 1 position, micro-sizing |
 | G3 | Use news/LLM as risk modifier, not sole signal | Classification only |
 | G4 | Full restart safety and auditability | Event sourcing |
@@ -55,7 +55,7 @@ This system is an AI-assisted automated trading bot for Binance USDⓈ-M perpetu
 | NG1 | Predicting tops/bottoms | Trend-following only; no reversal calls |
 | NG2 | Live self-learning that modifies trading rules | All learning is offline; changes require explicit promotion |
 | NG3 | High-frequency trading | Multi-day holds; no sub-minute execution |
-| NG4 | Spot trading or margin trading | USDⓈ-M perps only |
+| NG4 | Spot trading or margin trading | USD-M perps only |
 | NG5 | Multi-exchange arbitrage | Binance Futures only |
 | NG6 | Full portfolio optimization | Max 1-2 positions for $100 account |
 | NG7 | Martingale or grid strategies | Explicitly forbidden |
@@ -66,7 +66,7 @@ This system is an AI-assisted automated trading bot for Binance USDⓈ-M perpetu
 
 | Category | Assumption |
 |----------|------------|
-| **Market** | Binance USDⓈ-M perpetual futures only |
+| **Market** | Binance USD-M perpetual futures only |
 | **Collateral** | USDT margin mode |
 | **Position Mode** | One-way mode (not hedge mode) |
 | **Starting Equity** | $100 (scalable to larger accounts) |
@@ -218,7 +218,7 @@ This system is an AI-assisted automated trading bot for Binance USDⓈ-M perpetu
 ```
 DAILY at 00:00 UTC (or on startup):
 
-1. FETCH all USDⓈ-M perpetual symbols from exchangeInfo
+1. FETCH all USD-M perpetual symbols from exchangeInfo
    - Filter: status = "TRADING", contractType = "PERPETUAL", quoteAsset = "USDT"
 
 2. FETCH 24hr ticker for all symbols
@@ -1635,7 +1635,7 @@ ON SIGTERM/SIGINT:
 | ATR | Average True Range - volatility indicator |
 | EMA | Exponential Moving Average |
 | Perp | Perpetual futures contract (no expiry) |
-| USDⓈ-M | USD-margined contracts (settled in USDT/USDC) |
+| USD-M | USD-margined contracts (settled in USDT/USDC) |
 | Funding Rate | Periodic payment between longs and shorts |
 | Mark Price | Fair price used for liquidation calculations |
 | Notional | Position size × price |

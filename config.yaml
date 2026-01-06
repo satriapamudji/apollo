@@ -3,6 +3,12 @@ run:
   mode: paper
   enable_trading: false
   live_confirm: ""
+backtest:
+  execution_model: realistic
+  slippage_base_bps: 2
+  slippage_atr_scale: 1.0
+  fill_probability_model: true
+  random_seed: 42
 binance:
   base_url: https://fapi.binance.com
   ws_url: wss://fstream.binance.com
@@ -17,14 +23,39 @@ strategy:
     ema_fast: 8
     ema_slow: 21
     atr_period: 14
+    volume_sma_period: 20
   entry:
     style: breakout
     score_threshold: 0.55
+    max_breakout_extension_atr: 1.5
+    volume_breakout_threshold: 1.5
+    volume_confirmation_enabled: true
   exit:
     atr_stop_multiplier: 2.0
     trailing_start_atr: 1.5
     trailing_distance_atr: 1.5
     time_stop_days: 7
+  scoring:
+    enabled: true
+    threshold: 0.55
+    factors:
+      trend: 0.35
+      volatility: 0.15
+      entry_quality: 0.25
+      funding: 0.10
+      news: 0.15
+      liquidity: 0.0
+      volume: 0.0
+regime:
+  enabled: true
+  adx_trending_threshold: 25.0
+  adx_ranging_threshold: 20.0
+  chop_trending_threshold: 50.0
+  chop_ranging_threshold: 61.8
+  transitional_size_multiplier: 0.5
+  volatility_regime_enabled: false
+  volatility_contraction_threshold: 0.5
+  volatility_expansion_threshold: 2.0
 risk:
   risk_per_trade_pct: 0.75
   max_leverage: 5
@@ -76,3 +107,7 @@ monitoring:
   log_http: false
   log_http_responses: false
   log_http_max_body_chars: 1000
+watchdog:
+  enabled: true
+  interval_sec: 300
+  auto_recover: true

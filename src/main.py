@@ -2,34 +2,44 @@
 
 from __future__ import annotations
 
-import atexit
 import asyncio
+import atexit
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import structlog
+import uvicorn
 
+from src.api.operator import create_app
 from src.config.settings import load_settings
-from src.connectors import BinanceRestClient, LLMClassifier, NewsIngester
+from src.connectors import (
+    BinanceRestClient,
+    LLMClassifier,
+    LLMNewsClassifierAdapter,
+    NewsIngester,
+    RuleBasedNewsClassifier,
+)
 from src.execution import ExecutionEngine
 from src.execution.user_stream import UserDataStream
 from src.ledger import EventBus, EventLedger, EventType, StateManager
 from src.models import TradeProposal
 from src.monitoring import (
+    AlertWebhookHandler,
     EventConsoleLogger,
     Metrics,
     OrderLogger,
+    PerformanceTelemetry,
     ThinkingLogger,
     TradeLogger,
     configure_logging,
 )
 from src.risk.engine import RiskEngine
 from src.strategy import SignalGenerator, SignalType, UniverseSelector
+from src.strategy.portfolio import PortfolioSelector, TradeCandidate
 from src.utils import parse_symbol_filters
 from src.utils.single_instance import SingleInstanceAlreadyRunning, SingleInstanceLock
-
 
 log = structlog.get_logger(__name__)
 
@@ -95,16 +105,46 @@ async def main_async() -> None:
     for event_type in event_console.include:
         event_bus.register(event_type, event_console.handle_event)
 
+    # Initialize alert webhooks if configured
+    if settings.monitoring.alert_webhooks:
+        alert_handler = AlertWebhookHandler(
+            webhook_urls=settings.monitoring.alert_webhooks,
+            run_mode=settings.run.mode,
+        )
+        event_bus.register(EventType.MANUAL_INTERVENTION, alert_handler.handle_event)
+        event_bus.register(EventType.CIRCUIT_BREAKER_TRIGGERED, alert_handler.handle_event)
+
     rest = BinanceRestClient(settings)
+    metrics = Metrics()
+
+    # Sync server time before making any signed requests
+    try:
+        await rest.sync_server_time()
+        metrics.binance_time_sync_offset_ms.set(rest.get_time_offset())
+    except Exception as exc:
+        log.warning("initial_time_sync_failed", error=str(exc))
+
     news_ingester = NewsIngester(settings.news)
+
     llm_key = settings.openai_api_key or settings.anthropic_api_key
     llm = LLMClassifier(settings.llm, llm_key)
+
+    # News classifier is deterministic by default; LLM is optional behind a feature flag.
+    if settings.news.classifier_provider == "llm":
+        news_classifier = LLMNewsClassifierAdapter(llm)
+        news_classifier_source = "llm_classifier"
+    else:
+        news_classifier = RuleBasedNewsClassifier()
+        news_classifier_source = "rule_classifier"
     risk_engine = RiskEngine(settings.risk)
-    signal_generator = SignalGenerator(settings.strategy)
-    universe_selector = UniverseSelector(rest, settings.universe)
-    execution_engine = ExecutionEngine(settings, rest, event_bus)
+    signal_generator = SignalGenerator(settings.strategy, settings.regime)
+    universe_selector = UniverseSelector(rest, settings.universe, event_bus=event_bus)
+    execution_engine = ExecutionEngine(
+        settings, rest, event_bus, state_path=settings.storage.state_path
+    )
     event_bus.register(EventType.ORDER_FILLED, execution_engine.handle_order_filled)
     event_bus.register(EventType.ORDER_CANCELLED, execution_engine.handle_order_cancelled)
+    portfolio_selector = PortfolioSelector(max_positions=settings.risk.max_positions)
 
     log.info(
         "runtime_config",
@@ -120,8 +160,8 @@ async def main_async() -> None:
             reasons=execution_engine.trading_block_reasons,
         )
 
-    metrics = Metrics()
     metrics.start(settings.monitoring.metrics_port)
+    execution_engine.set_metrics(metrics)
     trade_logger = TradeLogger(f"{settings.storage.logs_path}/trades.csv")
     event_bus.register(EventType.POSITION_OPENED, trade_logger.handle_event)
     event_bus.register(EventType.POSITION_CLOSED, trade_logger.handle_event)
@@ -131,6 +171,19 @@ async def main_async() -> None:
     event_bus.register(EventType.ORDER_FILLED, order_logger.handle_event)
     event_bus.register(EventType.ORDER_CANCELLED, order_logger.handle_event)
     thinking_logger = ThinkingLogger(f"{settings.storage.logs_path}/thinking.jsonl")
+
+    # Initialize performance telemetry
+    telemetry = PerformanceTelemetry(
+        metrics=metrics,
+        rest_client=rest if not execution_engine.simulate else None,
+        logs_path=settings.storage.logs_path,
+        trades_csv_path=f"{settings.storage.logs_path}/trades.csv",
+        simulate=execution_engine.simulate,
+    )
+    event_bus.register(EventType.ORDER_PLACED, telemetry.handle_order_placed)
+    event_bus.register(EventType.ORDER_FILLED, telemetry.handle_order_filled)
+    event_bus.register(EventType.POSITION_OPENED, telemetry.handle_position_opened)
+    event_bus.register(EventType.POSITION_CLOSED, telemetry.handle_position_closed)
 
     await event_bus.publish(EventType.SYSTEM_STARTED, {"version": "0.1.0"})
 
@@ -145,20 +198,39 @@ async def main_async() -> None:
 
     last_processed_candles: dict[str, pd.Timestamp] = {}
 
-    await _reconcile(state_manager, event_bus, rest)
+    # Track consecutive reconciliation failures for alerting
+    reconciliation_failure_count = 0
+
+    await _reconcile(state_manager, event_bus, rest, metrics)
+
+    # Recovery: Validate persisted pending entries against open orders from Binance
+    if execution_engine._state_store:
+        await _recover_pending_entries(execution_engine, rest, event_bus)
+
     user_stream = UserDataStream(settings, rest, event_bus, state_manager)
 
     async def universe_loop() -> None:
         while True:
             try:
-                universe = await universe_selector.select()
-                symbols = [u.symbol for u in universe]
+                result = await universe_selector.select_with_filtering()
+                symbols = [u.symbol for u in result.selected]
+                filtered_symbols = [f.symbol for f in result.filtered]
                 await event_bus.publish(
                     EventType.UNIVERSE_UPDATED,
-                    {"symbols": symbols},
+                    {
+                        "symbols": symbols,
+                        "filtered_count": len(filtered_symbols),
+                        "filtered_symbols": filtered_symbols,
+                    },
                     {"source": "universe_selector"},
                 )
-                log.info("universe_selected", count=len(symbols), symbols=symbols)
+                log.info(
+                    "universe_selected",
+                    count=len(symbols),
+                    symbols=symbols,
+                    filtered_count=len(filtered_symbols),
+                    filtered_symbols=filtered_symbols,
+                )
             except Exception as exc:
                 log.warning("universe_selection_failed", error=str(exc))
             await asyncio.sleep(60 * 60 * 24)
@@ -181,20 +253,63 @@ async def main_async() -> None:
                     },
                     {"source": "news_ingester"},
                 )
-                result = await llm.classify(item)
+                result = await news_classifier.classify(item)
                 await event_bus.publish(
                     EventType.NEWS_CLASSIFIED,
                     result.to_payload(),
-                    {"source": "llm_classifier"},
+                    {"source": news_classifier_source},
                 )
             await asyncio.sleep(settings.news.poll_interval_minutes * 60)
+
+    async def reconciliation_loop() -> None:
+        """Continuous reconciliation loop that runs every N minutes."""
+        nonlocal reconciliation_failure_count
+        while True:
+            if not settings.reconciliation.enabled:
+                await asyncio.sleep(60)
+                continue
+            try:
+                success = await _reconcile(state_manager, event_bus, rest, metrics)
+                if success:
+                    reconciliation_failure_count = 0
+                    metrics.reconciliation_success_total.inc()
+                else:
+                    reconciliation_failure_count += 1
+                    metrics.reconciliation_consecutive_failures.set(reconciliation_failure_count)
+            except Exception as exc:
+                reconciliation_failure_count += 1
+                metrics.reconciliation_failure_total.inc()
+                metrics.reconciliation_consecutive_failures.set(reconciliation_failure_count)
+                log.warning("reconciliation_loop_error", error=str(exc))
+
+            # Trigger manual review alert on consecutive failures
+            if reconciliation_failure_count >= settings.reconciliation.failure_threshold:
+                await event_bus.publish(
+                    EventType.MANUAL_INTERVENTION,
+                    {
+                        "action": "RECONCILIATION_FAILURE_THRESHOLD",
+                        "consecutive_failures": reconciliation_failure_count,
+                        "threshold": settings.reconciliation.failure_threshold,
+                        "reason": "Repeated reconciliation failures require manual review",
+                    },
+                    {"source": "reconciliation_loop"},
+                )
+                log.warning(
+                    "reconciliation_failure_threshold_reached",
+                    consecutive_failures=reconciliation_failure_count,
+                    threshold=settings.reconciliation.failure_threshold,
+                )
+                # Reset counter after alerting to avoid spamming
+                reconciliation_failure_count = 0
+
+            await asyncio.sleep(settings.reconciliation.interval_minutes * 60)
 
     async def strategy_loop() -> None:
         while True:
             signals = 0
-            approvals = 0
             rejections = 0
             exits = 0
+            candidates: list[TradeCandidate] = []
             state = state_manager.state
             if state.requires_manual_review or state.circuit_breaker_active:
                 log.warning(
@@ -208,10 +323,16 @@ async def main_async() -> None:
                 log.info("strategy_waiting_for_universe")
                 await asyncio.sleep(60)
                 continue
+
+            # Phase 1: Collect all candidates (don't execute yet)
             for symbol in state.universe:
                 try:
-                    daily_klines = await rest.get_klines(symbol, settings.strategy.trend_timeframe, 200)
-                    entry_klines = await rest.get_klines(symbol, settings.strategy.entry_timeframe, 200)
+                    daily_klines = await rest.get_klines(
+                        symbol, settings.strategy.trend_timeframe, 200
+                    )
+                    entry_klines = await rest.get_klines(
+                        symbol, settings.strategy.entry_timeframe, 200
+                    )
                 except Exception as exc:
                     log.warning("klines_fetch_failed", symbol=symbol, error=str(exc))
                     continue
@@ -222,7 +343,11 @@ async def main_async() -> None:
                     continue
                 candle_close = fourh_df.index[-1]
                 last_candle = last_processed_candles.get(symbol)
-                if last_candle is not None and candle_close <= last_candle:
+                # Check if we have a pending order for this candle (lifecycle tracking)
+                has_pending = execution_engine.has_pending_for_candle(
+                    symbol, candle_close.to_pydatetime()
+                )
+                if last_candle is not None and candle_close <= last_candle and not has_pending:
                     continue
                 last_processed_candles[symbol] = candle_close
                 try:
@@ -265,6 +390,26 @@ async def main_async() -> None:
                         },
                         {"source": "signal_engine"},
                     )
+
+                # Handle exits immediately (they reduce position count)
+                if signal.signal_type == SignalType.EXIT and open_position:
+                    exits += 1
+                    await execution_engine.execute_exit(
+                        open_position, signal.price, signal.reason or "EXIT"
+                    )
+
+                # Handle trailing stops for open positions
+                if open_position:
+                    current_price = float(fourh_df["close"].iloc[-1])
+                    atr = signal.atr if signal else None
+                    if atr and atr > 0:
+                        filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
+                        tick_size = filters.tick_size if filters else 0.0001
+                        await execution_engine.update_trailing_stop(
+                            open_position, current_price, atr, tick_size
+                        )
+
+                # Collect entry candidates for cross-sectional selection
                 if signal.signal_type in {SignalType.LONG, SignalType.SHORT}:
                     filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
                     proposal = TradeProposal(
@@ -280,6 +425,7 @@ async def main_async() -> None:
                         news_risk=news_risk,
                         trade_id=signal.trade_id or "",
                         created_at=datetime.now(timezone.utc),
+                        candle_timestamp=fourh_df.index[-1].to_pydatetime(),
                     )
                     await event_bus.publish(
                         EventType.TRADE_PROPOSED,
@@ -315,42 +461,171 @@ async def main_async() -> None:
                             {"source": "risk_engine"},
                         )
                         continue
-                    approvals += 1
-                    await event_bus.publish(
-                        EventType.RISK_APPROVED,
-                        {"symbol": symbol, "trade_id": proposal.trade_id},
-                        {"source": "risk_engine"},
+
+                    # Add to candidates for cross-sectional selection
+                    candidates.append(
+                        TradeCandidate(
+                            symbol=symbol,
+                            proposal=proposal,
+                            risk_result=risk_result,
+                            score=signal.score,
+                            funding_rate=funding_rate,
+                            news_risk=news_risk,
+                            candle_timestamp=candle_close,
+                        )
                     )
-                    await execution_engine.execute_entry(proposal, risk_result, filters, state)
-                elif signal.signal_type == SignalType.EXIT and open_position:
-                    exits += 1
-                    await execution_engine.execute_exit(open_position, signal.price, signal.reason or "EXIT")
+
+            # Phase 2: Cross-sectional selection
+            blocked_symbols = {s for s in state.universe if state_manager.blocks_entries(s)}
+            selected = portfolio_selector.select(
+                candidates=candidates,
+                current_positions=state.positions,
+                blocked_symbols=blocked_symbols,
+                state=state,
+            )
+
+            # Phase 3: Execute selected trades
+            executed_count = 0
+            for candidate in selected:
+                filters = parse_symbol_filters(symbol_filters_map.get(candidate.symbol, []))
+                await execution_engine.execute_entry(
+                    candidate.proposal,
+                    candidate.risk_result,
+                    filters,
+                    state,
+                )
+                executed_count += 1
+                await event_bus.publish(
+                    EventType.RISK_APPROVED,
+                    {"symbol": candidate.symbol, "trade_id": candidate.proposal.trade_id},
+                    {"source": "portfolio_selector"},
+                )
+
+            # Phase 4: Emit cycle summary event
+            ineligible_reasons: dict[str, str] = {}
+            for c in candidates:
+                if not c.selected and c.rank is not None:
+                    # Determine why not selected
+                    if c.symbol in blocked_symbols:
+                        ineligible_reasons[c.symbol] = f"news_blocked ({c.news_risk})"
+                    elif c.symbol in state.positions:
+                        ineligible_reasons[c.symbol] = "already_have_position"
+                    else:
+                        # Check if we hit max positions
+                        current_entry_count = sum(
+                            1
+                            for pos in state.positions.values()
+                            if pos.symbol not in blocked_symbols
+                        )
+                        if current_entry_count >= settings.risk.max_positions:
+                            ineligible_reasons[c.symbol] = (
+                                f"max_positions_reached "
+                                f"({current_entry_count}/{settings.risk.max_positions})"
+                            )
+                        else:
+                            ineligible_reasons[c.symbol] = (
+                                f"rank_too_low ({c.rank} > {settings.risk.max_positions})"
+                            )
+
+            summary = portfolio_selector.get_selection_summary(
+                candidates, selected, ineligible_reasons
+            )
+            await event_bus.publish(
+                EventType.TRADE_CYCLE_COMPLETED,
+                summary,
+                {"source": "portfolio_selector"},
+            )
+
             metrics.update_state(state_manager.state)
             log.info(
                 "strategy_cycle_complete",
                 universe=len(state.universe),
                 signals=signals,
-                approvals=approvals,
+                candidates=len(candidates),
+                selected=executed_count,
                 rejections=rejections,
                 exits=exits,
             )
             await asyncio.sleep(60 * 15)
 
-    await asyncio.gather(universe_loop(), news_loop(), strategy_loop(), user_stream.run())
+    async def watchdog_loop() -> None:
+        """Periodic watchdog to verify protective orders are on-exchange."""
+        while True:
+            try:
+                await execution_engine.verify_protective_orders(state_manager.state)
+            except Exception as exc:
+                log.warning("watchdog_cycle_failed", error=str(exc))
+            await asyncio.sleep(settings.watchdog.interval_sec)
+
+    async def api_server() -> None:
+        """Run the operator API server."""
+        config = uvicorn.Config(
+            create_app(),
+            host="127.0.0.1",
+            port=settings.monitoring.api_port,
+            log_level="info",
+        )
+        server = uvicorn.Server(config)
+        await server.serve()
+
+    async def telemetry_loop() -> None:
+        """Periodic telemetry updates and daily summary generation."""
+        last_daily_summary_date: str | None = None
+        while True:
+            try:
+                # Update metrics every 5 minutes
+                await telemetry.update_metrics()
+
+                # Check if we need to generate daily summary (at UTC 00:00)
+                now = datetime.now(timezone.utc)
+                today_str = now.strftime("%Y-%m-%d")
+                # Trigger at start of new day (between 00:00 and 00:05 UTC)
+                if now.hour == 0 and now.minute < 5 and last_daily_summary_date != today_str:
+                    await telemetry.run_daily_summary()
+                    last_daily_summary_date = today_str
+            except Exception as exc:
+                log.warning("telemetry_loop_error", error=str(exc))
+            await asyncio.sleep(60 * 5)  # 5 minutes
+
+    await asyncio.gather(
+        universe_loop(),
+        news_loop(),
+        strategy_loop(),
+        reconciliation_loop(),
+        user_stream.run(),
+        watchdog_loop(),
+        api_server(),
+        telemetry_loop(),
+    )
 
 
 async def _reconcile(
-    state_manager: StateManager, event_bus: EventBus, rest: BinanceRestClient
-) -> None:
+    state_manager: StateManager,
+    event_bus: EventBus,
+    rest: BinanceRestClient,
+    metrics: Metrics | None = None,
+) -> bool:
+    """
+    Reconcile exchange state with internal state.
+
+    Returns True if reconciliation succeeded, False on API errors.
+    """
     try:
         account = await rest.get_account_info()
         positions = await rest.get_position_risk()
         orders = await rest.get_open_orders()
     except Exception as exc:
         log.warning("reconciliation_failed", error=str(exc))
-        return
+        return False
 
     discrepancies = state_manager.reconcile(account, positions, orders)
+
+    # Update discrepancy metrics
+    if metrics is not None:
+        for discrepancy in discrepancies:
+            disc_type = discrepancy.get("action", "UNKNOWN")
+            metrics.reconciliation_discrepancy_total.labels(type=disc_type).inc()
+
     for discrepancy in discrepancies:
         await event_bus.publish(
             EventType.MANUAL_INTERVENTION,
@@ -362,6 +637,63 @@ async def _reconcile(
         {"discrepancies": len(discrepancies)},
         {"source": "reconciliation"},
     )
+    return True
+
+
+async def _recover_pending_entries(
+    execution_engine: ExecutionEngine, rest: BinanceRestClient, event_bus: EventBus
+) -> None:
+    """
+    Recover pending entries from state store and validate against open orders from Binance.
+
+    On restart, if an entry order was placed before the bot crashed, the pending entry
+    context is persisted. We need to:
+    1. Load persisted pending entries from state store
+    2. Fetch open orders from Binance
+    3. Cross-reference: only keep pending entries whose orders are still open
+    4. If order is no longer open, remove from state store (it was either filled
+       - which will be handled by reconciliation - or cancelled)
+    """
+    try:
+        open_orders = await rest.get_open_orders()
+    except Exception as exc:
+        log.warning("pending_entries_recovery_failed", error=str(exc))
+        return
+
+    # Build set of open client order IDs from exchange
+    open_client_ids: set[str] = set()
+    for order in open_orders:
+        client_id = order.get("clientOrderId") or str(order.get("orderId"))
+        if client_id:
+            open_client_ids.add(client_id)
+
+    # Get persisted entries
+    persisted = execution_engine._state_store.load_all()
+    recovered_count = 0
+    stale_count = 0
+
+    for client_order_id in list(persisted.keys()):
+        if client_order_id not in open_client_ids:
+            # Order no longer open on exchange - remove from state store
+            # It was either filled (recovered by reconciliation) or cancelled
+            execution_engine._state_store.remove(client_order_id)
+            stale_count += 1
+            # Remove from memory if present
+            execution_engine._pending_entries.pop(client_order_id, None)
+        else:
+            recovered_count += 1
+
+    if recovered_count > 0:
+        log.info(
+            "pending_entries_recovered",
+            recovered=recovered_count,
+            stale=stale_count,
+        )
+    elif stale_count > 0:
+        log.info(
+            "pending_entries_stale_cleaned",
+            stale=stale_count,
+        )
 
 
 async def _kill_switch(state_manager: StateManager, execution_engine: ExecutionEngine) -> None:

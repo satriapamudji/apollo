@@ -1,5 +1,5 @@
 """
-Binance USDⓈ-M Perpetual Futures Trend-Following Bot
+Binance USD-M Perpetual Futures Trend-Following Bot
 
 AI-assisted trading system with deterministic risk management.
 """

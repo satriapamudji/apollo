@@ -22,12 +22,15 @@ class LLMResult:
     summary: str
 
     def to_payload(self) -> dict[str, Any]:
+        # Keep payload stable across classifier providers.
         return {
             "event_type": self.event_type,
             "symbols_mentioned": self.symbols_mentioned,
+            "exchanges_mentioned": [],
             "sentiment": self.sentiment,
             "risk_level": self.risk_level,
             "risk_reason": self.risk_reason,
+            "matched_rules": [],
             "confidence": self.confidence,
             "summary": self.summary,
         }

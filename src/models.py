@@ -29,3 +29,21 @@ class TradeProposal:
     created_at: datetime
     is_entry: bool = True
     reason: str | None = None
+    candle_timestamp: datetime | None = None  # The candle this signal belongs to (for lifecycle tracking)
+
+
+@dataclass(frozen=True)
+class OrderLifecycle:
+    """Tracks the full lifecycle of an entry order."""
+
+    client_order_id: str
+    trade_id: str
+    symbol: str
+    side: Side
+    state: Literal["PLACED", "OPEN", "FILLED", "CANCELLED", "EXPIRED"]
+    created_at: datetime
+    last_updated: datetime
+    candle_timestamp: datetime | None  # The candle this order belongs to
+    fill_price: float | None = None
+    cancel_reason: str | None = None
+    attempt_count: int = 1

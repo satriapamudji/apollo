@@ -14,7 +14,7 @@ import asyncio
 import csv
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -66,7 +66,7 @@ async def fetch_klines(
     limit: int = MAX_KLINES_PER_REQUEST,
 ) -> list[list[Any]]:
     """Fetch klines from Binance Futures API with retries."""
-    params = {
+    params: dict[str, str | int] = {
         "symbol": symbol,
         "interval": interval,
         "startTime": start_time,
@@ -92,7 +92,7 @@ async def fetch_klines(
                 continue
 
             response.raise_for_status()
-            return response.json()
+            return cast("list[list[Any]]", response.json())
 
         except httpx.HTTPStatusError as e:
             if e.response.status_code in {500, 502, 503}:
@@ -210,7 +210,7 @@ async def download_funding_rates(
 
     async with httpx.AsyncClient(base_url=BASE_URL, timeout=30.0) as client:
         while current_start < end_ms:
-            params = {
+            params: dict[str, str | int] = {
                 "symbol": symbol,
                 "startTime": current_start,
                 "endTime": end_ms,
