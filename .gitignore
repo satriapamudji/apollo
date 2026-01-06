@@ -34,13 +34,22 @@ pytest-cache-files-*/
 /logs/
 /data/ledger/
 /data/state/
+/data/market/
+/data/backtests/
+/data/crowding/
+/data/funding/
 /data/test_ledgers/
 /data/test_ledger_temp/
+/data/test_telemetry/
 /archive/
 
 # Local experiments / vendor
 /temp_ccxt/
 /_tmp_test_base/
+
+# Local audits / references
+/docs/01_audit/
+/docs/01_audits/
 
 # OS / editor
 .DS_Store
