@@ -1,6 +1,6 @@
 # Module Reference
 
-Detailed breakdown of each module in the Binance Trend Bot codebase.
+Detailed breakdown of each module in the Apollo codebase.
 
 ## Table of Contents
 

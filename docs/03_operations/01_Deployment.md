@@ -1,6 +1,6 @@
 # Deployment Guide
 
-Guide to deploying the Binance Trend Bot in various environments.
+Guide to deploying the Apollo in various environments.
 
 ## Prerequisites
 
@@ -18,7 +18,7 @@ Guide to deploying the Binance Trend Bot in various environments.
 ```bash
 # Clone repository
 git clone <repository-url>
-cd binance_trading
+cd apollo
 
 # Create virtual environment
 python -m venv .venv
@@ -175,8 +175,8 @@ run:
 sudo useradd -m -s /bin/bash trader
 sudo -u trader bash
 cd ~
-git clone <repository-url> binance_trading
-cd binance_trading
+git clone <repository-url> apollo
+cd apollo
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -197,20 +197,20 @@ nano config_live.yaml  # Configure for live
 
 ```ini
 [Unit]
-Description=Binance Trend Bot
+Description=Apollo
 After=network.target
 
 [Service]
 Type=simple
 User=trader
 Group=trader
-WorkingDirectory=/home/trader/binance_trading
-Environment=CONFIG_PATH=/home/trader/binance_trading/config_live.yaml
-ExecStart=/home/trader/binance_trading/.venv/bin/bot
+WorkingDirectory=/home/trader/apollo
+Environment=CONFIG_PATH=/home/trader/apollo/config_live.yaml
+ExecStart=/home/trader/apollo/.venv/bin/bot
 Restart=on-failure
 RestartSec=30
-StandardOutput=append:/home/trader/binance_trading/logs/bot_stdout.log
-StandardError=append:/home/trader/binance_trading/logs/bot_stderr.log
+StandardOutput=append:/home/trader/apollo/logs/bot_stdout.log
+StandardError=append:/home/trader/apollo/logs/bot_stderr.log
 
 [Install]
 WantedBy=multi-user.target
@@ -229,7 +229,7 @@ sudo systemctl status binance-bot
 
 ```bash
 sudo journalctl -u binance-bot -f
-tail -f /home/trader/binance_trading/logs/bot_stdout.log
+tail -f /home/trader/apollo/logs/bot_stdout.log
 ```
 
 ### Docker (Optional)

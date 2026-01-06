@@ -1,6 +1,6 @@
 # System Overview
 
-This document provides a comprehensive architectural overview of the Binance Trend Bot, a production-grade algorithmic trading system for Binance USD-M perpetual futures.
+This document provides a comprehensive architectural overview of the Apollo, a production-grade algorithmic trading system for Binance USD-M perpetual futures.
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@ This document provides a comprehensive architectural overview of the Binance Tre
 
 ## System Purpose
 
-The Binance Trend Bot is an AI-assisted trend-following system designed for:
+The Apollo is an AI-assisted trend-following system designed for:
 
 - **Automated Trading**: Executes trend-following strategies on Binance USD-M perpetual futures
 - **Risk Management**: Enforces deterministic hard limits on leverage, position sizing, and drawdown
@@ -405,7 +405,7 @@ Open Position
 ## Directory Structure
 
 ```
-binance_trading/
+apollo/
 ├── src/
 │   ├── main.py              # Entry point, runtime loops
 │   ├── models.py            # Core data models

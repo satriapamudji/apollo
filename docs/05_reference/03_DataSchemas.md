@@ -1,6 +1,6 @@
 # Data Schemas Reference
 
-Reference for all data formats used in the Binance Trend Bot.
+Reference for all data formats used in the Apollo.
 
 ## Event Ledger
 

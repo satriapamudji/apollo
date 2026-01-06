@@ -1,6 +1,6 @@
 # Monitoring Guide
 
-Comprehensive guide to monitoring the Binance Trend Bot.
+Comprehensive guide to monitoring the Apollo.
 
 ## Overview
 

@@ -1,6 +1,6 @@
 # CLI Tools Reference
 
-Reference for all command-line tools in the Binance Trend Bot.
+Reference for all command-line tools in the Apollo.
 
 ## Console Scripts
 

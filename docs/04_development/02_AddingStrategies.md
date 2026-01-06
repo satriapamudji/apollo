@@ -1,6 +1,6 @@
 # Adding Strategies
 
-Guide to developing and integrating trading strategies in the Binance Trend Bot.
+Guide to developing and integrating trading strategies in the Apollo.
 
 ## Overview
 

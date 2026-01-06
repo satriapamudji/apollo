@@ -248,21 +248,21 @@ def test_load_strategy_spec_valid(workspace_tmp_path: Path) -> None:
         assert spec.spec_hash  # Should have computed hash
         assert spec.spec_path == str(strategy_dir / "strategy.md")
 
-            # Check parameters
-            assert "ema_fast" in spec.parameters
-            assert spec.parameters["ema_fast"].type == "int"
-            assert spec.parameters["ema_fast"].default == 8
-            assert spec.parameters["ema_fast"].min == 2.0
+        # Check parameters
+        assert "ema_fast" in spec.parameters
+        assert spec.parameters["ema_fast"].type == "int"
+        assert spec.parameters["ema_fast"].default == 8
+        assert spec.parameters["ema_fast"].min == 2.0
 
-            assert "entry_style" in spec.parameters
-            assert spec.parameters["entry_style"].enum == ["breakout", "pullback"]
+        assert "entry_style" in spec.parameters
+        assert spec.parameters["entry_style"].enum == ["breakout", "pullback"]
 
-            # Check requirements
-            assert len(spec.requires.bars) == 1
-            assert spec.requires.bars[0].interval == "4h"
-            assert len(spec.requires.derived) == 1
-            assert spec.requires.derived[0].from_interval == "4h"
-            assert spec.requires.funding is True
+        # Check requirements
+        assert len(spec.requires.bars) == 1
+        assert spec.requires.bars[0].interval == "4h"
+        assert len(spec.requires.derived) == 1
+        assert spec.requires.derived[0].from_interval == "4h"
+        assert spec.requires.funding is True
 
         assert spec.assumptions.bar_time == "close_time"
     finally:

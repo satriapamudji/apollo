@@ -1,6 +1,6 @@
-# Binance Trend Bot
+# Apollo
 
-AI-assisted trend-following bot for Binance USD-M perpetual futures with event sourcing, deterministic risk gates, and paper/testnet/live run modes.
+AI-assisted trading bot for Binance USD-M perpetual futures with event sourcing, deterministic risk gates, and paper/testnet/live run modes.
 
 ## Table of Contents
 
@@ -77,7 +77,7 @@ AI-assisted trend-following bot for Binance USD-M perpetual futures with event s
 ```bash
 # Clone repository
 git clone <repository-url>
-cd binance_trading
+cd apollo
 
 # Install with dependencies
 pip install -e .

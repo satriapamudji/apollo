@@ -1,6 +1,6 @@
 # Backtester Overview
 
-Architecture and design of the Binance Trend Bot backtesting system.
+Architecture and design of the Apollo backtesting system.
 
 ## Purpose
 

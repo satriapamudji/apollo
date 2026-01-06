@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "binance-trend-bot"
+name = "apollo"
 version = "0.1.0"
-description = "AI-assisted Binance USD-M Perpetual Futures Trend-Following Bot"
+description = "Apollo - AI-assisted Binance USD-M Perpetual Futures Trading Bot"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

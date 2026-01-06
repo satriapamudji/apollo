@@ -1,6 +1,6 @@
 # Getting Started for Developers
 
-Developer onboarding guide for the Binance Trend Bot codebase.
+Developer onboarding guide for the Apollo codebase.
 
 ## Table of Contents
 
@@ -37,7 +37,7 @@ Developer onboarding guide for the Binance Trend Bot codebase.
 
 ```bash
 git clone <repository-url>
-cd binance_trading
+cd apollo
 ```
 
 ### 2. Create Virtual Environment
@@ -92,7 +92,7 @@ bot
 ## Project Structure
 
 ```
-binance_trading/
+apollo/
 ├── src/                      # Application source code
 │   ├── main.py               # Entry point
 │   ├── models.py             # Core data models

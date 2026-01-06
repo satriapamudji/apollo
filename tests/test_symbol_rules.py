@@ -165,19 +165,19 @@ def test_load_symbol_rules_from_file(workspace_tmp_path: Path) -> None:
 
     snapshot = load_symbol_rules(temp_path)
 
-        assert snapshot.source_file == "exchange_info_20240115_120000.json"
-        assert snapshot.effective_date.year == 2024
-        assert snapshot.effective_date.month == 1
-        assert snapshot.effective_date.day == 15
+    assert snapshot.source_file == "exchange_info_20240115_120000.json"
+    assert snapshot.effective_date.year == 2024
+    assert snapshot.effective_date.month == 1
+    assert snapshot.effective_date.day == 15
 
-        assert snapshot.has_symbol("BTCUSDT")
-        assert not snapshot.has_symbol("ETHUSDT")
+    assert snapshot.has_symbol("BTCUSDT")
+    assert not snapshot.has_symbol("ETHUSDT")
 
-        rule = snapshot.get_rule("BTCUSDT")
-        assert rule.tick_size == 0.10
-        assert rule.step_size == 0.001
-        assert rule.min_qty == 0.001
-        assert rule.min_notional == 5.0
+    rule = snapshot.get_rule("BTCUSDT")
+    assert rule.tick_size == 0.10
+    assert rule.step_size == 0.001
+    assert rule.min_qty == 0.001
+    assert rule.min_notional == 5.0
     # file cleanup handled by workspace_tmp_path fixture
 
 
@@ -248,10 +248,10 @@ def test_find_rules_for_date(workspace_tmp_path: Path) -> None:
     data_dir = workspace_tmp_path / "rules"
     data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create dated files
-        file1 = data_dir / "symbol_rules_20240101_120000.json"
-        file2 = data_dir / "symbol_rules_20240115_120000.json"
-        file3 = data_dir / "symbol_rules_20240201_120000.json"
+    # Create dated files
+    file1 = data_dir / "symbol_rules_20240101_120000.json"
+    file2 = data_dir / "symbol_rules_20240115_120000.json"
+    file3 = data_dir / "symbol_rules_20240201_120000.json"
 
     for f in [file1, file2, file3]:
         f.write_text('{"rules": {}}', encoding="utf-8")

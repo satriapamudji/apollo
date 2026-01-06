@@ -1,6 +1,6 @@
 # Operations Runbook
 
-Operational procedures for running and maintaining the Binance Trend Bot.
+Operational procedures for running and maintaining the Apollo.
 
 ## Table of Contents
 
@@ -112,14 +112,14 @@ Start-Process -NoNewWindow -FilePath "bot" -RedirectStandardOutput "logs\bot.out
 ```ini
 # /etc/systemd/system/binance-bot.service
 [Unit]
-Description=Binance Trend Bot
+Description=Apollo
 After=network.target
 
 [Service]
 Type=simple
 User=trader
-WorkingDirectory=/home/trader/binance_trading
-ExecStart=/home/trader/binance_trading/.venv/bin/bot
+WorkingDirectory=/home/trader/apollo
+ExecStart=/home/trader/apollo/.venv/bin/bot
 Restart=on-failure
 RestartSec=30
 
@@ -530,7 +530,7 @@ kill -HUP $(cat logs/bot.pid)
 
 **logrotate config (Linux):**
 ```
-/home/trader/binance_trading/logs/*.log {
+/home/trader/apollo/logs/*.log {
     daily
     rotate 30
     compress

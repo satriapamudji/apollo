@@ -1,6 +1,6 @@
 # Event System
 
-Deep dive into the event sourcing architecture used in the Binance Trend Bot.
+Deep dive into the event sourcing architecture used in the Apollo.
 
 ## Overview
 

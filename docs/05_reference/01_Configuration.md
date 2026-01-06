@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Complete reference for all configuration options in the Binance Trend Bot.
+Complete reference for all configuration options in the Apollo.
 
 ## Table of Contents
 

@@ -1,6 +1,6 @@
 # Operator API Reference
 
-REST API reference for the Binance Trend Bot operator interface.
+REST API reference for the Apollo operator interface.
 
 ## Overview
 

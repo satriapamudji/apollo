@@ -1,6 +1,6 @@
 # Running Backtests
 
-Practical guide to running backtests with the Binance Trend Bot.
+Practical guide to running backtests with the Apollo.
 
 ## Quick Start
 

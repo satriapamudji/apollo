@@ -267,6 +267,18 @@ def _print_multi_symbol_summary(result: MultiSymbolResult) -> None:
     print("=" * 60)
 
 
+def _serialize_strategy_metadata(strategy_metadata):
+    """Convert strategy metadata to JSON-serializable dict."""
+    if strategy_metadata is None:
+        return None
+    return {
+        "name": strategy_metadata.name,
+        "version": strategy_metadata.version,
+        "spec_hash": strategy_metadata.spec_hash,
+        "resolved_parameters": strategy_metadata.resolved_parameters,
+    }
+
+
 def _save_multi_symbol_results(result: MultiSymbolResult, out_dir: Path, strategy_metadata) -> None:
     """Save multi-symbol results to output directory."""
     import csv
@@ -346,7 +358,7 @@ def _save_multi_symbol_results(result: MultiSymbolResult, out_dir: Path, strateg
         },
     }
     if strategy_metadata:
-        summary["strategy"] = strategy_metadata
+        summary["strategy"] = _serialize_strategy_metadata(strategy_metadata)
 
     summary_file = out_dir / "summary.json"
     with open(summary_file, "w") as f:
