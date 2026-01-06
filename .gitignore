@@ -1,5 +1,7 @@
 # Secrets
 .env
+AGENTS.md
+uv.lock
 
 # Git internals (Codex/Windows workaround)
 .gitx/
@@ -32,6 +34,7 @@ pytest-cache-files-*/
 
 # Runtime artifacts (local state)
 /logs/
+/data/
 /data/ledger/
 /data/state/
 /data/market/
