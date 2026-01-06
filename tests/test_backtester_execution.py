@@ -195,6 +195,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             filled2, price2, _ = sim2.fill_order(
                 proposal_price=100.0,
@@ -202,6 +203,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             assert filled1 == filled2
             assert price1 == price2
@@ -221,6 +223,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             filled2, _, _ = sim2.fill_order(
                 proposal_price=100.0,
@@ -228,6 +231,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             results1.append(filled1)
             results2.append(filled2)
@@ -245,6 +249,7 @@ class TestExecutionSimulator:
                 order_type="MARKET",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             assert filled
 
@@ -261,6 +266,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             if filled:
                 fill_count += 1
@@ -286,6 +292,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             results1.append(filled)
 
@@ -299,6 +306,7 @@ class TestExecutionSimulator:
                 order_type="LIMIT",
                 atr=1.0,
                 atr_pct=0.01,
+                side="BUY",
             )
             results2.append(filled)
 

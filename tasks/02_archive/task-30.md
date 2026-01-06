@@ -12,13 +12,17 @@ Current YAML contains universe settings (`universe.size`, `universe.min_quote_vo
 
 ## Deliverables
 
-### 1) Define dataset identity and immutability rules
-Adopt a dataset folder convention under:
-- `data/datasets/<dataset_id>/...`
+### 1) Define storage vs snapshot semantics (shared store + pinned manifests)
+We want **one shared dataset store** that any backtest can reuse, and **immutable snapshots** for reproducibility.
+
+Adopt a two-layer convention under:
+- Shared append-only store: `data/datasets/usdm/store/...`
+- Pinned snapshots: `data/datasets/usdm/snapshots/<snapshot_id>/...`
 
 Rules:
-- Dataset directories are immutable once created.
-- Rebuild attempts must either fail with a clear message or create a new `dataset_id` (non-destructive).
+- The store is **append-only and partitioned** (e.g., by date/month) so existing files are not rewritten in-place.
+- A snapshot is **immutable** once created (`manifest.json` + `checksums.sha256` define the exact inputs for a run).
+- Adding a new interval later (e.g., `1h`) means adding new store partitions; old snapshots remain valid.
 
 ### 2) Universe builder tool
 Create a tool that uses public USD-M endpoints to build a universe snapshot:
@@ -30,13 +34,20 @@ Create a tool that uses public USD-M endpoints to build a universe snapshot:
 Output:
 - `universe/universe_<date>.json` with symbols + selection metrics + selection parameters.
 
-### 3) Dataset build tool (minimum viable)
-Create a tool that, given `dataset_id` + universe:
-- downloads trade klines for required intervals (at least `4h` for current strategy),
-- downloads funding history,
-- stores artifacts under the dataset directory,
-- writes `manifest.json` with provenance and assumptions,
-- writes `checksums.sha256` for all files.
+### 3) Store builder + snapshot builder (minimum viable)
+Create tools that:
+
+**(a) Store builder** (reusable, strategy-agnostic)
+- Downloads and writes partitioned artifacts into `data/datasets/usdm/store/`:
+  - trade klines for required intervals (at least `4h` for current strategy; extensible to `1h` later),
+  - funding history,
+  - exchangeInfo snapshots and normalized symbol rules.
+
+**(b) Snapshot builder** (pins a run input set)
+- Given a universe snapshot + time range + intervals, creates:
+  - `data/datasets/usdm/snapshots/<snapshot_id>/manifest.json`
+  - `data/datasets/usdm/snapshots/<snapshot_id>/checksums.sha256`
+- The snapshot must list the exact store files included (or exact partition keys) so results are reproducible even as the store grows.
 
 The manifest must record:
 - endpoints, params, paging strategy (kline max limit), retry/backoff behavior
@@ -52,9 +63,9 @@ Create a dataset validator that:
 - reports missing data ranges/gaps.
 
 ## Acceptance Criteria
-- A dataset can be built and validated offline using `manifest.json` + `checksums.sha256`.
+- A snapshot can be built and validated offline using `manifest.json` + `checksums.sha256`.
 - Universe selection is captured as an artifact (not just YAML parameters).
-- Dataset build does not overwrite existing files and is safe to rerun.
+- Store ingestion does not overwrite existing partitions and is safe to rerun.
 - Validator provides clear PASS/FAIL output per artifact type.
 
 ## Files to Modify
@@ -66,4 +77,3 @@ Create a dataset validator that:
 ## Notes
 - Keep the first implementation CSV-friendly if needed; parquet can be added in a follow-up once dependencies are chosen.
 - Rate-limit handling must be explicit and recorded in the manifest so “data quality” is auditable.
-

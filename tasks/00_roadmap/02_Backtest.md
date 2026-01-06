@@ -142,32 +142,35 @@ From `exchangeInfo`, normalize per symbol:
 
 ---
 
-## 5) Offline Dataset Layout (Versioned, Immutable)
+## 5) Offline Data Layout (Shared Store + Snapshot Manifests)
 
 ### 5.1 Folder structure
-Use immutable dataset directories under:
-- `data/datasets/<dataset_id>/`
+Use a shared append-only store that any backtest can reuse, plus pinned snapshots for reproducibility:
+- Store (reusable): `data/datasets/usdm/store/`
+- Snapshots (immutable): `data/datasets/usdm/snapshots/<snapshot_id>/`
 
-Example:
-- `data/datasets/<dataset_id>/manifest.json`
-- `data/datasets/<dataset_id>/checksums.sha256`
-- `data/datasets/<dataset_id>/metadata/exchangeInfo/2026-01-06.json`
-- `data/datasets/<dataset_id>/metadata/symbol_rules.parquet`
-- `data/datasets/<dataset_id>/universe/universe_2026-01-06.json`
-- `data/datasets/<dataset_id>/bars/trade/interval=4h/symbol=BTCUSDT/part-000.parquet`
-- `data/datasets/<dataset_id>/bars/trade/interval=1d/symbol=BTCUSDT/part-000.parquet` (optional; can also be derived)
-- `data/datasets/<dataset_id>/funding/symbol=BTCUSDT/part-000.parquet`
-- `data/datasets/<dataset_id>/micro/bookTicker/symbol=BTCUSDT/part-000.parquet` (tier 2)
+Example store artifacts:
+- `data/datasets/usdm/store/metadata/exchangeInfo/2026-01-06T163500Z.json`
+- `data/datasets/usdm/store/metadata/symbol_rules/2026-01-06T163500Z.parquet`
+- `data/datasets/usdm/store/universe/2026-01-06.json`
+- `data/datasets/usdm/store/bars/trade/interval=4h/symbol=BTCUSDT/date=2026-01-06/part-000.parquet`
+- `data/datasets/usdm/store/bars/trade/interval=1d/symbol=BTCUSDT/date=2026-01-06/part-000.parquet` (optional; can also be derived)
+- `data/datasets/usdm/store/funding/symbol=BTCUSDT/date=2026-01-06/part-000.parquet`
+- `data/datasets/usdm/store/micro/bookTicker/symbol=BTCUSDT/date=2026-01-06/part-000.parquet` (tier 2)
+
+Example snapshot:
+- `data/datasets/usdm/snapshots/<snapshot_id>/manifest.json`
+- `data/datasets/usdm/snapshots/<snapshot_id>/checksums.sha256`
 
 ### 5.2 manifest.json (minimum required fields)
 Store:
-- `dataset_id`, `created_at_utc`, `schema_version`
+- `snapshot_id`, `created_at_utc`, `schema_version`
 - `product`: `binance_usdm_perp`
 - `environment`: `production_market_data` / `testnet_market_data` (explicit)
 - `symbols` included, intervals included, time ranges per artifact
 - `provenance`: endpoints used + request params + page sizes + errors observed
 - `assumptions`: fee schedule, funding application rules, execution model parameters
-- `hashes`: per file sha256 + row counts
+- `hashes`: per referenced store file sha256 + row counts (pins the snapshot)
 
 ---
 
@@ -311,7 +314,7 @@ You are a senior quant/dev architect specializing in Binance USD-M perpetuals, o
      - refresh/update policy
 
 2) **Dataset Layout (Offline-First, Versioned)**
-   - Define a dataset folder structure under `data/datasets/<dataset_id>/`.
+   - Define a shared store under `data/datasets/usdm/store/` and snapshots under `data/datasets/usdm/snapshots/<snapshot_id>/`.
    - Include: `manifest.json` (provenance + assumptions + schema versions) and `checksums.sha256`.
    - Define canonical timestamp semantics:
      - Bar replay time = candle close time

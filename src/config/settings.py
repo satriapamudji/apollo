@@ -308,6 +308,29 @@ class BacktestConfig(BaseModel):
     slippage_atr_scale: float = Field(default=1.0, ge=0.0, le=5.0)
     fill_probability_model: bool = Field(default=True)
     random_seed: int | None = Field(default=None, ge=0)
+    # Spread model settings
+    spread_model: Literal["none", "conservative"] = Field(
+        default="conservative",
+        description="Spread model: 'none' (no spread gating) or 'conservative' (ATR-scaled model)",
+    )
+    spread_base_pct: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=0.5,
+        description="Base spread percentage in calm market conditions",
+    )
+    spread_atr_scale: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=2.0,
+        description="How much ATR affects spread (0.5 = spread increases by 0.5% per 1% ATR)",
+    )
+    max_spread_pct: float = Field(
+        default=0.3,
+        ge=0.05,
+        le=1.0,
+        description="Maximum allowed spread percentage for entry (rejects trades above this)",
+    )
 
 
 class PaperSimConfig(BaseModel):

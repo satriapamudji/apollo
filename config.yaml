@@ -10,11 +10,21 @@ backtest:
   fill_probability_model: true
   random_seed: 42
 binance:
+  # Production endpoints (used when run.mode=live)
   base_url: https://fapi.binance.com
   ws_url: wss://fstream.binance.com
+  # Testnet endpoints (used when run.mode=testnet)
+  # These are the official Binance Futures testnet URLs
+  testnet_base_url: https://testnet.binancefuture.com
+  testnet_ws_url: wss://stream.binancefuture.com
   recv_window: 5000
   user_stream_enabled: true
   user_stream_keepalive_sec: 1800
+  # Market data can optionally use production endpoints even in testnet mode
+  # Set use_production_market_data: true to fetch real market data while trading on testnet
+  use_production_market_data: false
+  market_data_base_url: https://fapi.binance.com
+  market_data_ws_url: wss://fstream.binance.com
 strategy:
   name: trend_following_v1
   trend_timeframe: 1d

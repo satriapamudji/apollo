@@ -53,6 +53,10 @@ pytest-cache-files-*/
 # Local audits / references
 /docs/01_audit/
 /docs/01_audits/
+/docs/02_audit/
+
+# Local editor/agent settings
+/.claude/
 
 # OS / editor
 .DS_Store

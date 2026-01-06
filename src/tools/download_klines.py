@@ -167,24 +167,27 @@ async def download_klines(
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Write to CSV
+    # Write to CSV with canonical schema
     # Binance kline format: [open_time, open, high, low, close, volume, close_time, ...]
-    # We use close_time as the timestamp (consistent with live trading)
-    fieldnames = ["timestamp", "open", "high", "low", "close", "volume"]
+    # We emit both open_time and close_time for unambiguous bar identification
+    fieldnames = ["open_time", "close_time", "open", "high", "low", "close", "volume"]
 
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
 
         for kline in all_klines:
-            writer.writerow({
-                "timestamp": kline[6],  # close_time in ms
-                "open": kline[1],
-                "high": kline[2],
-                "low": kline[3],
-                "close": kline[4],
-                "volume": kline[5],
-            })
+            writer.writerow(
+                {
+                    "open_time": kline[0],  # candle open time in ms
+                    "close_time": kline[6],  # candle close time in ms
+                    "open": kline[1],
+                    "high": kline[2],
+                    "low": kline[3],
+                    "close": kline[4],
+                    "volume": kline[5],
+                }
+            )
 
     print(f"Saved {len(all_klines)} klines to {output_path}")
     return len(all_klines)
@@ -267,21 +270,21 @@ async def download_funding_rates(
         writer.writeheader()
 
         for record in all_funding:
-            writer.writerow({
-                "timestamp": record["fundingTime"],
-                "symbol": record["symbol"],
-                "funding_rate": record["fundingRate"],
-                "mark_price": record.get("markPrice", ""),
-            })
+            writer.writerow(
+                {
+                    "timestamp": record["fundingTime"],
+                    "symbol": record["symbol"],
+                    "funding_rate": record["fundingRate"],
+                    "mark_price": record.get("markPrice", ""),
+                }
+            )
 
     print(f"Saved {len(all_funding)} funding records to {output_path}")
     return len(all_funding)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Download Binance Futures klines for backtesting."
-    )
+    parser = argparse.ArgumentParser(description="Download Binance Futures klines for backtesting.")
     parser.add_argument(
         "--symbol",
         required=True,

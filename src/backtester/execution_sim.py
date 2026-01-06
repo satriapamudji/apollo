@@ -14,9 +14,9 @@ from typing import Literal
 class VolatilityRegime(StrEnum):
     """Market volatility regime classification."""
 
-    LOW = "LOW"      # Calm market (ATR% < 0.5%)
+    LOW = "LOW"  # Calm market (ATR% < 0.5%)
     NORMAL = "NORMAL"  # Normal volatility (ATR% 0.5-1.5%)
-    HIGH = "HIGH"    # High volatility (ATR% > 1.5%)
+    HIGH = "HIGH"  # High volatility (ATR% > 1.5%)
 
 
 def detect_volatility_regime(atr_pct: float) -> VolatilityRegime:
@@ -171,8 +171,10 @@ class ExecutionSimulator:
         order_type: Literal["LIMIT", "MARKET"],
         atr: float,
         atr_pct: float,
+        side: Literal["BUY", "SELL"],
         limit_distance_bps: float = 0.0,
         holding_time_bars: int = 1,
+        spread_pct: float | None = None,
     ) -> tuple[bool, float, bool]:
         """Simulate order execution and determine fill details.
 
@@ -182,21 +184,37 @@ class ExecutionSimulator:
             order_type: Order type - LIMIT or MARKET
             atr: ATR in price units
             atr_pct: ATR as percentage of price
+            side: Order side - BUY or SELL (explicit, not inferred from price)
             limit_distance_bps: Distance from market for limit orders
             holding_time_bars: Bars the order has been waiting
+            spread_pct: Bid-ask spread as percentage (optional). When provided,
+                       half-spread is used as slippage floor for marketable orders.
 
         Returns:
             Tuple of (filled: bool, fill_price: float, is_partial: bool)
         """
         regime = detect_volatility_regime(atr_pct)
 
-        # Calculate slippage for this execution
-        slippage = estimate_slippage(
+        # Calculate model-based slippage
+        model_slippage = estimate_slippage(
             atr=atr,
             price=current_price,
             order_type=order_type,
             volatility_regime=regime,
         )
+
+        # Determine if order is "marketable" (crossing the spread)
+        # MARKET orders are always marketable
+        # LIMIT orders within 5 bps of market are effectively marketable
+        is_marketable = order_type == "MARKET" or limit_distance_bps <= 5
+
+        # Apply half-spread floor for marketable orders
+        # This represents the minimum cost of crossing the bid-ask spread
+        if spread_pct is not None and is_marketable:
+            half_spread_decimal = (spread_pct / 100) / 2
+            effective_slippage = max(model_slippage, half_spread_decimal)
+        else:
+            effective_slippage = model_slippage
 
         # Determine if order fills
         if order_type == "MARKET":
@@ -216,13 +234,14 @@ class ExecutionSimulator:
             partial = filled and self.random.random() < 0.5
 
         # Calculate fill price with slippage
+        # Slippage is ALWAYS adverse: BUY pays more, SELL receives less
         if filled:
-            if proposal_price >= current_price:
-                # Buy order: price goes up
-                fill_price = proposal_price * (1 + slippage)
+            if side == "BUY":
+                # Buy order: slippage increases fill price (adverse)
+                fill_price = proposal_price * (1 + effective_slippage)
             else:
-                # Sell order: price goes down
-                fill_price = proposal_price * (1 - slippage)
+                # Sell order: slippage decreases fill price (adverse)
+                fill_price = proposal_price * (1 - effective_slippage)
         else:
             fill_price = proposal_price
 

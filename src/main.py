@@ -39,6 +39,11 @@ from src.monitoring import (
 )
 from src.risk.engine import RiskEngine
 from src.strategy import SignalGenerator, SignalType, UniverseSelector
+from src.strategy.package import (
+    StrategyNotFoundError,
+    load_strategy_spec,
+    validate_strategy_config,
+)
 from src.strategy.portfolio import PortfolioSelector, TradeCandidate
 from src.utils import parse_symbol_filters
 from src.utils.single_instance import SingleInstanceAlreadyRunning, SingleInstanceLock
@@ -82,7 +87,9 @@ def _klines_to_df(klines: list[list[Any]]) -> pd.DataFrame:
 
 async def main_async() -> None:
     settings = load_settings()
-    configure_logging(settings.monitoring.log_level, settings.storage.logs_path, settings.monitoring)
+    configure_logging(
+        settings.monitoring.log_level, settings.storage.logs_path, settings.monitoring
+    )
     if sys.version_info < (3, 10) or sys.version_info >= (3, 13):
         log.warning(
             "python_version_unverified",
@@ -92,6 +99,47 @@ async def main_async() -> None:
     if errors:
         log.error("settings_validation_failed", errors=errors, run_mode=settings.run.mode)
         return
+
+    # Strategy spec validation
+    strategy_name = settings.strategy.name
+    try:
+        strategy_spec = load_strategy_spec(strategy_name)
+        spec_errors = validate_strategy_config(strategy_spec, settings.strategy)
+        if spec_errors:
+            if settings.run.mode in ("testnet", "live"):
+                log.error(
+                    "strategy_spec_validation_failed",
+                    strategy=strategy_name,
+                    errors=spec_errors,
+                )
+                return
+            else:
+                log.warning(
+                    "strategy_spec_validation_issues",
+                    strategy=strategy_name,
+                    errors=spec_errors,
+                )
+        else:
+            log.info(
+                "strategy_spec_loaded",
+                strategy=strategy_name,
+                version=strategy_spec.version,
+                spec_hash=strategy_spec.spec_hash[:12],
+            )
+    except StrategyNotFoundError:
+        if settings.run.mode in ("testnet", "live"):
+            log.error(
+                "strategy_spec_not_found",
+                strategy=strategy_name,
+                hint=f"Create strategies/{strategy_name}/strategy.md",
+            )
+            return
+        else:
+            log.warning(
+                "strategy_spec_not_found",
+                strategy=strategy_name,
+                hint="Running without spec validation in paper mode",
+            )
 
     lock_path = Path(settings.storage.logs_path) / f"bot.{settings.run.mode}.lock"
     instance_lock = SingleInstanceLock(lock_path)
@@ -478,9 +526,7 @@ async def main_async() -> None:
                             filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
                             proposal = TradeProposal(
                                 symbol=symbol,
-                                side="LONG"
-                                if signal.signal_type == SignalType.LONG
-                                else "SHORT",
+                                side="LONG" if signal.signal_type == SignalType.LONG else "SHORT",
                                 entry_price=signal.entry_price or signal.price,
                                 stop_price=signal.stop_price or signal.price,
                                 take_profit=signal.take_profit,

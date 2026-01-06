@@ -7,9 +7,12 @@ import json
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.backtester.engine import BacktestResult, EquityPoint, Trade
+
+if TYPE_CHECKING:
+    from src.strategy.package import StrategyMetadata
 
 
 def compute_metrics(result: BacktestResult) -> dict[str, Any]:
@@ -23,6 +26,7 @@ def compute_metrics(result: BacktestResult) -> dict[str, Any]:
     - Max consecutive losses
     - Monthly returns table
     - Funding metrics: total funding paid, PnL with/without funding
+    - Spread metrics: avg spread at entry, spread rejections
     """
     trades = result.trades
     metrics: dict[str, Any] = {
@@ -38,22 +42,29 @@ def compute_metrics(result: BacktestResult) -> dict[str, Any]:
         # Funding metrics
         "total_funding_paid": result.total_funding_paid,
         "pnl_with_funding": result.pnl_with_funding,
-        "pnl_without_funding": result.total_return * result.initial_equity + result.total_funding_paid,
+        "pnl_without_funding": result.total_return * result.initial_equity
+        + result.total_funding_paid,
+        # Spread metrics
+        "spread_rejections": result.spread_rejections,
+        "avg_spread_at_entry_pct": round(result.avg_spread_at_entry_pct, 4),
+        "spread_source": result.spread_source,
     }
 
     if not trades:
-        metrics.update({
-            "expectancy": 0.0,
-            "profit_factor": 0.0,
-            "avg_r_multiple": 0.0,
-            "max_consecutive_losses": 0,
-            "avg_win": 0.0,
-            "avg_loss": 0.0,
-            "largest_win": 0.0,
-            "largest_loss": 0.0,
-            "avg_holding_hours": 0.0,
-            "monthly_returns": {},
-        })
+        metrics.update(
+            {
+                "expectancy": 0.0,
+                "profit_factor": 0.0,
+                "avg_r_multiple": 0.0,
+                "max_consecutive_losses": 0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+                "largest_win": 0.0,
+                "largest_loss": 0.0,
+                "avg_holding_hours": 0.0,
+                "monthly_returns": {},
+            }
+        )
         return metrics
 
     # Separate wins and losses
@@ -117,20 +128,22 @@ def compute_metrics(result: BacktestResult) -> dict[str, Any]:
         for month, pnl in sorted(monthly_pnl.items())
     }
 
-    metrics.update({
-        "expectancy": round(expectancy, 4),
-        "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else "inf",
-        "avg_r_multiple": round(avg_r_multiple, 2),
-        "max_consecutive_losses": max_consecutive_losses,
-        "avg_win": round(avg_win, 4),
-        "avg_loss": round(avg_loss, 4),
-        "largest_win": round(largest_win, 4),
-        "largest_loss": round(largest_loss, 4),
-        "avg_holding_hours": round(avg_holding_hours, 2),
-        "winning_trades": len(wins),
-        "losing_trades": len(losses),
-        "monthly_returns": monthly_returns,
-    })
+    metrics.update(
+        {
+            "expectancy": round(expectancy, 4),
+            "profit_factor": round(profit_factor, 2) if profit_factor != float("inf") else "inf",
+            "avg_r_multiple": round(avg_r_multiple, 2),
+            "max_consecutive_losses": max_consecutive_losses,
+            "avg_win": round(avg_win, 4),
+            "avg_loss": round(avg_loss, 4),
+            "largest_win": round(largest_win, 4),
+            "largest_loss": round(largest_loss, 4),
+            "avg_holding_hours": round(avg_holding_hours, 2),
+            "winning_trades": len(wins),
+            "losing_trades": len(losses),
+            "monthly_returns": monthly_returns,
+        }
+    )
 
     return metrics
 
@@ -151,6 +164,7 @@ def write_trade_csv(trades: list[Trade], path: Path) -> None:
         "funding_cost",
         "pnl_without_funding",
         "holding_hours",
+        "spread_at_entry_pct",
     ]
 
     with open(path, "w", newline="") as f:
@@ -158,21 +172,24 @@ def write_trade_csv(trades: list[Trade], path: Path) -> None:
         writer.writeheader()
         for trade in trades:
             pnl_without_funding = trade.net_pnl + trade.funding_cost
-            writer.writerow({
-                "trade_id": trade.trade_id,
-                "symbol": trade.symbol,
-                "side": trade.direction,
-                "entry_time": trade.entry_time.isoformat(),
-                "exit_time": trade.exit_time.isoformat(),
-                "entry_price": trade.entry_price,
-                "exit_price": trade.exit_price,
-                "quantity": trade.quantity,
-                "gross_pnl": round(trade.gross_pnl, 6),
-                "net_pnl": round(trade.net_pnl, 6),
-                "funding_cost": round(trade.funding_cost, 6),
-                "pnl_without_funding": round(pnl_without_funding, 6),
-                "holding_hours": round(trade.holding_hours, 2),
-            })
+            writer.writerow(
+                {
+                    "trade_id": trade.trade_id,
+                    "symbol": trade.symbol,
+                    "side": trade.direction,
+                    "entry_time": trade.entry_time.isoformat(),
+                    "exit_time": trade.exit_time.isoformat(),
+                    "entry_price": trade.entry_price,
+                    "exit_price": trade.exit_price,
+                    "quantity": trade.quantity,
+                    "gross_pnl": round(trade.gross_pnl, 6),
+                    "net_pnl": round(trade.net_pnl, 6),
+                    "funding_cost": round(trade.funding_cost, 6),
+                    "pnl_without_funding": round(pnl_without_funding, 6),
+                    "holding_hours": round(trade.holding_hours, 2),
+                    "spread_at_entry_pct": round(trade.spread_at_entry_pct, 4),
+                }
+            )
 
 
 def write_equity_csv(equity_curve: list[EquityPoint], path: Path) -> None:
@@ -183,12 +200,14 @@ def write_equity_csv(equity_curve: list[EquityPoint], path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for point in equity_curve:
-            writer.writerow({
-                "timestamp": point.timestamp.isoformat(),
-                "equity": round(point.equity, 6),
-                "drawdown": round(point.drawdown, 6),
-                "drawdown_pct": round(point.drawdown * 100, 2),
-            })
+            writer.writerow(
+                {
+                    "timestamp": point.timestamp.isoformat(),
+                    "equity": round(point.equity, 6),
+                    "drawdown": round(point.drawdown, 6),
+                    "drawdown_pct": round(point.drawdown * 100, 2),
+                }
+            )
 
 
 def write_summary_json(metrics: dict[str, Any], path: Path) -> None:
@@ -209,13 +228,19 @@ def print_summary(metrics: dict[str, Any]) -> None:
     print(f"  Max Drawdown:       {metrics['max_drawdown_pct']:>10.2f}%")
 
     # Funding breakdown
-    total_funding = metrics.get('total_funding_paid', 0.0)
-    pnl_with_funding = metrics.get('pnl_with_funding', metrics['total_return'] * metrics['initial_equity'])
-    pnl_without_funding = metrics.get('pnl_without_funding', pnl_with_funding - total_funding)
+    total_funding = metrics.get("total_funding_paid", 0.0)
+    pnl_with_funding = metrics.get(
+        "pnl_with_funding", metrics["total_return"] * metrics["initial_equity"]
+    )
+    pnl_without_funding = metrics.get("pnl_without_funding", pnl_with_funding - total_funding)
 
     print(f"\n{'FUNDING BREAKDOWN':=^40}")
     print(f"  PnL (no funding):   {pnl_without_funding:>10.2f}")
-    print(f"  Total Funding Paid: ({abs(total_funding):>10.2f})" if total_funding >= 0 else f"  Total Funding Paid:  {abs(total_funding):>10.2f}")
+    print(
+        f"  Total Funding Paid: ({abs(total_funding):>10.2f})"
+        if total_funding >= 0
+        else f"  Total Funding Paid:  {abs(total_funding):>10.2f}"
+    )
     print(f"  PnL (with funding): {pnl_with_funding:>10.2f}")
 
     print(f"\n{'TRADES':=^40}")
@@ -243,6 +268,14 @@ def print_summary(metrics: dict[str, Any]) -> None:
         for month, ret in monthly.items():
             print(f"  {month}:           {ret:>10.2f}%")
 
+    # Spread metrics (only show if spread model was used)
+    spread_source = metrics.get("spread_source", "none")
+    if spread_source != "none":
+        print(f"\n{'SPREAD ANALYSIS':=^40}")
+        print(f"  Spread Source:      {spread_source:>10}")
+        print(f"  Avg Spread Entry:   {metrics.get('avg_spread_at_entry_pct', 0.0):>10.4f}%")
+        print(f"  Spread Rejections:  {metrics.get('spread_rejections', 0):>10}")
+
     print("\n" + "=" * 60)
 
 
@@ -250,6 +283,7 @@ def generate_report(
     result: BacktestResult,
     out_dir: Path,
     symbol: str,
+    strategy_metadata: StrategyMetadata | None = None,
 ) -> dict[str, Any]:
     """Generate full backtest report with all artifacts.
 
@@ -257,6 +291,12 @@ def generate_report(
     - trades.csv: Detailed trade list
     - equity.csv: Equity curve over time
     - summary.json: All computed metrics
+
+    Args:
+        result: BacktestResult from backtester engine
+        out_dir: Output directory for report files
+        symbol: Symbol that was backtested
+        strategy_metadata: Optional strategy metadata for recording spec info
 
     Returns the computed metrics dictionary.
     """
@@ -267,6 +307,15 @@ def generate_report(
     metrics = compute_metrics(result)
     metrics["symbol"] = symbol
     metrics["generated_at"] = datetime.utcnow().isoformat()
+
+    # Add strategy metadata if provided
+    if strategy_metadata is not None:
+        metrics["strategy"] = {
+            "name": strategy_metadata.name,
+            "version": strategy_metadata.version,
+            "spec_hash": strategy_metadata.spec_hash,
+            "resolved_parameters": strategy_metadata.resolved_parameters,
+        }
 
     # Write files
     write_trade_csv(result.trades, out_dir / "trades.csv")
