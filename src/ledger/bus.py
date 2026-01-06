@@ -21,6 +21,7 @@ class EventBus:
         self._ledger = ledger
         self._handlers: dict[EventType, list[EventHandler]] = defaultdict(list)
         self._log = structlog.get_logger(__name__)
+        self._append_lock = asyncio.Lock()
 
     def register(self, event_type: EventType, handler: EventHandler) -> None:
         """Register a handler for a specific event type."""
@@ -33,7 +34,21 @@ class EventBus:
         metadata: dict[str, Any] | None = None,
     ) -> Event:
         """Append the event and dispatch to handlers."""
-        event = self._ledger.append(event_type, payload, metadata)
+        async with self._append_lock:
+            try:
+                event = await asyncio.to_thread(
+                    self._ledger.append,
+                    event_type,
+                    payload,
+                    metadata,
+                )
+            except OSError as exc:
+                self._log.error(
+                    "event_append_failed",
+                    event_type=event_type.value,
+                    error=str(exc),
+                )
+                raise
         await self._dispatch(event)
         return event
 

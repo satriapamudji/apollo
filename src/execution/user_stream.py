@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import structlog
 
@@ -15,6 +15,8 @@ from src.ledger.bus import EventBus
 from src.ledger.events import EventType
 from src.ledger.state import StateManager
 
+if TYPE_CHECKING:
+    from src.monitoring.metrics import Metrics
 
 class UserDataStream:
     """
@@ -31,12 +33,15 @@ class UserDataStream:
         rest: BinanceRestClient,
         event_bus: EventBus,
         state_manager: StateManager,
+        metrics: "Metrics" | None = None,
     ) -> None:
         self.settings = settings
         self.rest = rest
         self.event_bus = event_bus
         self.state_manager = state_manager
+        self.metrics = metrics
         self.log = structlog.get_logger(__name__)
+        self._last_message_time: float | None = None
 
     async def run(self) -> None:
         if self.settings.run.mode == "paper":
@@ -63,7 +68,7 @@ class UserDataStream:
                 await asyncio.sleep(5)
                 continue
 
-            ws_client = BinanceWebSocketClient(self.settings)
+            ws_client = BinanceWebSocketClient(self.settings, metrics=self.metrics)
             expired = asyncio.Event()
 
             async def handler(payload: dict[str, Any]) -> None:
@@ -76,9 +81,11 @@ class UserDataStream:
                         ws_client.stop()
                         return
                     if event_type == "ORDER_TRADE_UPDATE":
+                        self._last_message_time = asyncio.get_running_loop().time()
                         await self._handle_order_trade_update(data)
                         return
                     if event_type == "ACCOUNT_UPDATE":
+                        self._last_message_time = asyncio.get_running_loop().time()
                         await self._handle_account_update(data)
                         return
                 except Exception:
@@ -99,6 +106,11 @@ class UserDataStream:
                     await keepalive_task
 
             await asyncio.sleep(1 if expired.is_set() else 5)
+
+    def last_message_age_sec(self) -> float | None:
+        if self._last_message_time is None:
+            return None
+        return max(0.0, asyncio.get_running_loop().time() - self._last_message_time)
 
     async def _keepalive_loop(self, listen_key: str, keepalive_sec: int, stop: asyncio.Event) -> None:
         while not stop.is_set():

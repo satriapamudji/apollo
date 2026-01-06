@@ -18,6 +18,11 @@ class Metrics:
         self.ws_last_message_age_sec = Gauge("ws_last_message_age_sec", "Age of last WS msg")
         self.rest_request_latency_ms = Histogram("rest_request_latency_ms", "REST latency (ms)")
         self.rest_error_rate = Counter("rest_error_rate", "REST error rate")
+        self.loop_last_tick_age_sec = Gauge(
+            "loop_last_tick_age_sec",
+            "Seconds since the loop last ticked",
+            ["loop"],
+        )
 
         self.open_positions = Gauge("open_positions", "Number of open positions")
         self.daily_pnl_percent = Gauge("daily_pnl_percent", "Daily PnL percent")

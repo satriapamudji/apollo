@@ -6,6 +6,8 @@ import asyncio
 import atexit
 from datetime import datetime, timezone
 from pathlib import Path
+import time
+import sys
 from typing import Any
 
 import pandas as pd
@@ -46,18 +48,27 @@ log = structlog.get_logger(__name__)
 
 def _klines_to_df(klines: list[list[Any]]) -> pd.DataFrame:
     rows = []
+    if not isinstance(klines, list):
+        log.warning("klines_invalid_type", type=type(klines).__name__)
+        return pd.DataFrame()
     for kline in klines:
-        rows.append(
-            {
-                "open_time": kline[0],
-                "open": float(kline[1]),
-                "high": float(kline[2]),
-                "low": float(kline[3]),
-                "close": float(kline[4]),
-                "volume": float(kline[5]),
-                "close_time": kline[6] if len(kline) > 6 else kline[0],
-            }
-        )
+        try:
+            if len(kline) < 6:
+                raise IndexError("kline missing required fields")
+            rows.append(
+                {
+                    "open_time": kline[0],
+                    "open": float(kline[1]),
+                    "high": float(kline[2]),
+                    "low": float(kline[3]),
+                    "close": float(kline[4]),
+                    "volume": float(kline[5]),
+                    "close_time": kline[6] if len(kline) > 6 else kline[0],
+                }
+            )
+        except (TypeError, ValueError, IndexError) as exc:
+            log.warning("kline_parse_failed", error=str(exc))
+            continue
     df = pd.DataFrame(rows)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
@@ -71,7 +82,12 @@ def _klines_to_df(klines: list[list[Any]]) -> pd.DataFrame:
 
 async def main_async() -> None:
     settings = load_settings()
-    configure_logging(settings.monitoring.log_level)
+    configure_logging(settings.monitoring.log_level, settings.storage.logs_path, settings.monitoring)
+    if sys.version_info < (3, 10) or sys.version_info >= (3, 13):
+        log.warning(
+            "python_version_unverified",
+            version=f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        )
     errors = settings.validate_for_trading()
     if errors:
         log.error("settings_validation_failed", errors=errors, run_mode=settings.run.mode)
@@ -116,6 +132,7 @@ async def main_async() -> None:
 
     rest = BinanceRestClient(settings)
     metrics = Metrics()
+    rest.set_metrics(metrics)
 
     # Sync server time before making any signed requests
     try:
@@ -160,7 +177,10 @@ async def main_async() -> None:
             reasons=execution_engine.trading_block_reasons,
         )
 
-    metrics.start(settings.monitoring.metrics_port)
+    try:
+        metrics.start(settings.monitoring.metrics_port)
+    except Exception as exc:
+        log.warning("metrics_start_failed", error=str(exc))
     execution_engine.set_metrics(metrics)
     trade_logger = TradeLogger(f"{settings.storage.logs_path}/trades.csv")
     event_bus.register(EventType.POSITION_OPENED, trade_logger.handle_event)
@@ -201,16 +221,35 @@ async def main_async() -> None:
     # Track consecutive reconciliation failures for alerting
     reconciliation_failure_count = 0
 
-    await _reconcile(state_manager, event_bus, rest, metrics)
+    def _reconciliation_enabled() -> tuple[bool, str | None]:
+        if not settings.reconciliation.enabled:
+            return False, "disabled"
+        if settings.run.mode == "paper":
+            if not settings.reconciliation.allow_in_paper:
+                return False, "run_mode_paper"
+            if not (settings.active_binance_api_key and settings.active_binance_secret_key):
+                return False, "missing_api_keys"
+        return True, None
+
+    reconciliation_ok, reconciliation_reason = _reconciliation_enabled()
+    if reconciliation_ok:
+        await _reconcile(state_manager, event_bus, rest, metrics)
+    else:
+        log.info("reconciliation_skipped", reason=reconciliation_reason)
 
     # Recovery: Validate persisted pending entries against open orders from Binance
     if execution_engine._state_store:
         await _recover_pending_entries(execution_engine, rest, event_bus)
 
-    user_stream = UserDataStream(settings, rest, event_bus, state_manager)
+    user_stream = UserDataStream(settings, rest, event_bus, state_manager, metrics=metrics)
 
     async def universe_loop() -> None:
+        last_tick = time.time()
         while True:
+            now = time.time()
+            metrics.loop_last_tick_age_sec.labels(loop="universe").set(now - last_tick)
+            last_tick = now
+            delay_sec = settings.universe.refresh_interval_hours * 60 * 60
             try:
                 result = await universe_selector.select_with_filtering()
                 symbols = [u.symbol for u in result.selected]
@@ -233,39 +272,58 @@ async def main_async() -> None:
                 )
             except Exception as exc:
                 log.warning("universe_selection_failed", error=str(exc))
-            await asyncio.sleep(60 * 60 * 24)
+                delay_sec = settings.universe.retry_interval_minutes * 60
+            await asyncio.sleep(delay_sec)
 
     async def news_loop() -> None:
+        last_tick = time.time()
         while True:
-            if not settings.news.enabled:
+            now = time.time()
+            metrics.loop_last_tick_age_sec.labels(loop="news").set(now - last_tick)
+            last_tick = now
+            try:
+                if not settings.news.enabled:
+                    await asyncio.sleep(60)
+                    continue
+                for item in await news_ingester.fetch_async():
+                    try:
+                        await event_bus.publish(
+                            EventType.NEWS_INGESTED,
+                            {
+                                "source": item.source,
+                                "title": item.title,
+                                "link": item.link,
+                                "published": item.published.isoformat(),
+                                "summary": item.summary,
+                                "content": item.content,
+                            },
+                            {"source": "news_ingester"},
+                        )
+                        result = await news_classifier.classify(item)
+                        await event_bus.publish(
+                            EventType.NEWS_CLASSIFIED,
+                            result.to_payload(),
+                            {"source": news_classifier_source},
+                        )
+                    except Exception as exc:
+                        log.warning("news_item_failed", source=item.source, error=str(exc))
+                await asyncio.sleep(settings.news.poll_interval_minutes * 60)
+            except Exception as exc:
+                log.warning("news_loop_error", error=str(exc))
                 await asyncio.sleep(60)
-                continue
-            for item in news_ingester.fetch():
-                await event_bus.publish(
-                    EventType.NEWS_INGESTED,
-                    {
-                        "source": item.source,
-                        "title": item.title,
-                        "link": item.link,
-                        "published": item.published.isoformat(),
-                        "summary": item.summary,
-                        "content": item.content,
-                    },
-                    {"source": "news_ingester"},
-                )
-                result = await news_classifier.classify(item)
-                await event_bus.publish(
-                    EventType.NEWS_CLASSIFIED,
-                    result.to_payload(),
-                    {"source": news_classifier_source},
-                )
-            await asyncio.sleep(settings.news.poll_interval_minutes * 60)
 
     async def reconciliation_loop() -> None:
         """Continuous reconciliation loop that runs every N minutes."""
         nonlocal reconciliation_failure_count
+        last_tick = time.time()
         while True:
-            if not settings.reconciliation.enabled:
+            now = time.time()
+            metrics.loop_last_tick_age_sec.labels(loop="reconciliation").set(now - last_tick)
+            last_tick = now
+            reconciliation_ok, reconciliation_reason = _reconciliation_enabled()
+            if not reconciliation_ok:
+                if reconciliation_reason:
+                    log.info("reconciliation_skipped", reason=reconciliation_reason)
                 await asyncio.sleep(60)
                 continue
             try:
@@ -305,252 +363,275 @@ async def main_async() -> None:
             await asyncio.sleep(settings.reconciliation.interval_minutes * 60)
 
     async def strategy_loop() -> None:
+        last_tick = time.time()
         while True:
-            signals = 0
-            rejections = 0
-            exits = 0
-            candidates: list[TradeCandidate] = []
-            state = state_manager.state
-            if state.requires_manual_review or state.circuit_breaker_active:
-                log.warning(
-                    "strategy_paused",
-                    manual_review=state.requires_manual_review,
-                    circuit_breaker=state.circuit_breaker_active,
-                )
-                await asyncio.sleep(60)
-                continue
-            if not state.universe:
-                log.info("strategy_waiting_for_universe")
-                await asyncio.sleep(60)
-                continue
-
-            # Phase 1: Collect all candidates (don't execute yet)
-            for symbol in state.universe:
-                try:
-                    daily_klines = await rest.get_klines(
-                        symbol, settings.strategy.trend_timeframe, 200
+            now = time.time()
+            metrics.loop_last_tick_age_sec.labels(loop="strategy").set(now - last_tick)
+            last_tick = now
+            try:
+                signals = 0
+                rejections = 0
+                exits = 0
+                candidates: list[TradeCandidate] = []
+                state = state_manager.state
+                if state.requires_manual_review or state.circuit_breaker_active:
+                    log.warning(
+                        "strategy_paused",
+                        manual_review=state.requires_manual_review,
+                        circuit_breaker=state.circuit_breaker_active,
                     )
-                    entry_klines = await rest.get_klines(
-                        symbol, settings.strategy.entry_timeframe, 200
-                    )
-                except Exception as exc:
-                    log.warning("klines_fetch_failed", symbol=symbol, error=str(exc))
+                    await asyncio.sleep(60)
                     continue
-                daily_df = _klines_to_df(daily_klines)
-                fourh_df = _klines_to_df(entry_klines)
-                if daily_df.empty or fourh_df.empty:
-                    log.warning("klines_empty", symbol=symbol)
+                if not state.universe:
+                    log.info("strategy_waiting_for_universe")
+                    await asyncio.sleep(60)
                     continue
-                candle_close = fourh_df.index[-1]
-                last_candle = last_processed_candles.get(symbol)
-                # Check if we have a pending order for this candle (lifecycle tracking)
-                has_pending = execution_engine.has_pending_for_candle(
-                    symbol, candle_close.to_pydatetime()
-                )
-                if last_candle is not None and candle_close <= last_candle and not has_pending:
-                    continue
-                last_processed_candles[symbol] = candle_close
-                try:
-                    funding_rate = await rest.get_funding_rate(symbol)
-                except Exception:
-                    funding_rate = 0.0
-                news_risk = state_manager.get_news_risk(symbol)
-                news_blocked = state_manager.blocks_entries(symbol)
-                if news_blocked:
-                    news_risk = "HIGH"
-                open_position = state.positions.get(symbol)
-                signal = signal_generator.generate(
-                    symbol=symbol,
-                    daily_df=daily_df,
-                    fourh_df=fourh_df,
-                    funding_rate=funding_rate,
-                    news_risk=news_risk,
-                    open_position=open_position,
-                    current_time=fourh_df.index[-1].to_pydatetime(),
-                )
-                thinking_logger.log_signal(
-                    signal=signal,
-                    news_risk=news_risk,
-                    funding_rate=funding_rate,
-                    entry_style=settings.strategy.entry.style,
-                    score_threshold=settings.strategy.entry.score_threshold,
-                    trend_timeframe=settings.strategy.trend_timeframe,
-                    entry_timeframe=settings.strategy.entry_timeframe,
-                    has_open_position=bool(open_position),
-                    news_blocked=news_blocked,
-                )
-                if signal.signal_type != SignalType.NONE:
-                    signals += 1
-                    await event_bus.publish(
-                        EventType.SIGNAL_COMPUTED,
-                        {
-                            "symbol": symbol,
-                            "signal_type": signal.signal_type.value,
-                            "score": signal.score.composite if signal.score else None,
-                        },
-                        {"source": "signal_engine"},
-                    )
 
-                # Handle exits immediately (they reduce position count)
-                if signal.signal_type == SignalType.EXIT and open_position:
-                    exits += 1
-                    await execution_engine.execute_exit(
-                        open_position, signal.price, signal.reason or "EXIT"
-                    )
-
-                # Handle trailing stops for open positions
-                if open_position:
-                    current_price = float(fourh_df["close"].iloc[-1])
-                    atr = signal.atr if signal else None
-                    if atr and atr > 0:
-                        filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
-                        tick_size = filters.tick_size if filters else 0.0001
-                        await execution_engine.update_trailing_stop(
-                            open_position, current_price, atr, tick_size
+                # Phase 1: Collect all candidates (don't execute yet)
+                for symbol in state.universe:
+                    try:
+                        daily_klines = await rest.get_klines(
+                            symbol, settings.strategy.trend_timeframe, 200
                         )
-
-                # Collect entry candidates for cross-sectional selection
-                if signal.signal_type in {SignalType.LONG, SignalType.SHORT}:
-                    filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
-                    proposal = TradeProposal(
-                        symbol=symbol,
-                        side="LONG" if signal.signal_type == SignalType.LONG else "SHORT",
-                        entry_price=signal.entry_price or signal.price,
-                        stop_price=signal.stop_price or signal.price,
-                        take_profit=signal.take_profit,
-                        atr=signal.atr,
-                        leverage=settings.risk.default_leverage,
-                        score=signal.score,
-                        funding_rate=funding_rate,
-                        news_risk=news_risk,
-                        trade_id=signal.trade_id or "",
-                        created_at=datetime.now(timezone.utc),
-                        candle_timestamp=fourh_df.index[-1].to_pydatetime(),
-                    )
-                    await event_bus.publish(
-                        EventType.TRADE_PROPOSED,
-                        {
-                            "symbol": symbol,
-                            "side": proposal.side,
-                            "entry_price": proposal.entry_price,
-                            "stop_price": proposal.stop_price,
-                            "trade_id": proposal.trade_id,
-                        },
-                        {"source": "signal_engine"},
-                    )
-                    risk_result = risk_engine.evaluate(
-                        state=state,
-                        proposal=proposal,
-                        symbol_filters=filters,
-                        now=datetime.now(timezone.utc),
-                    )
-                    thinking_logger.log_risk(proposal, risk_result)
-                    if risk_result.circuit_breaker:
-                        await event_bus.publish(
-                            EventType.CIRCUIT_BREAKER_TRIGGERED,
-                            {"reason": "MAX_DRAWDOWN"},
-                            {"source": "risk_engine"},
+                        entry_klines = await rest.get_klines(
+                            symbol, settings.strategy.entry_timeframe, 200
                         )
-                        await _kill_switch(state_manager, execution_engine)
-                        continue
-                    if not risk_result.approved:
-                        rejections += 1
-                        await event_bus.publish(
-                            EventType.RISK_REJECTED,
-                            {"symbol": symbol, "reasons": risk_result.reasons},
-                            {"source": "risk_engine"},
+                        daily_df = _klines_to_df(daily_klines)
+                        fourh_df = _klines_to_df(entry_klines)
+                        if daily_df.empty or fourh_df.empty:
+                            log.warning("klines_empty", symbol=symbol)
+                            continue
+                        candle_close = fourh_df.index[-1]
+                        last_candle = last_processed_candles.get(symbol)
+                        # Check if we have a pending order for this candle (lifecycle tracking)
+                        has_pending = execution_engine.has_pending_for_candle(
+                            symbol, candle_close.to_pydatetime()
                         )
-                        continue
-
-                    # Add to candidates for cross-sectional selection
-                    candidates.append(
-                        TradeCandidate(
+                        if (
+                            last_candle is not None
+                            and candle_close <= last_candle
+                            and not has_pending
+                        ):
+                            continue
+                        last_processed_candles[symbol] = candle_close
+                        try:
+                            funding_rate = await rest.get_funding_rate(symbol)
+                        except Exception:
+                            funding_rate = 0.0
+                        news_risk = state_manager.get_news_risk(symbol)
+                        news_blocked = state_manager.blocks_entries(symbol)
+                        if news_blocked:
+                            news_risk = "HIGH"
+                        open_position = state.positions.get(symbol)
+                        signal = signal_generator.generate(
                             symbol=symbol,
-                            proposal=proposal,
-                            risk_result=risk_result,
-                            score=signal.score,
+                            daily_df=daily_df,
+                            fourh_df=fourh_df,
                             funding_rate=funding_rate,
                             news_risk=news_risk,
-                            candle_timestamp=candle_close,
+                            open_position=open_position,
+                            current_time=fourh_df.index[-1].to_pydatetime(),
                         )
-                    )
+                        thinking_logger.log_signal(
+                            signal=signal,
+                            news_risk=news_risk,
+                            funding_rate=funding_rate,
+                            entry_style=settings.strategy.entry.style,
+                            score_threshold=settings.strategy.entry.score_threshold,
+                            trend_timeframe=settings.strategy.trend_timeframe,
+                            entry_timeframe=settings.strategy.entry_timeframe,
+                            has_open_position=bool(open_position),
+                            news_blocked=news_blocked,
+                        )
+                        if signal.signal_type != SignalType.NONE:
+                            signals += 1
+                            await event_bus.publish(
+                                EventType.SIGNAL_COMPUTED,
+                                {
+                                    "symbol": symbol,
+                                    "signal_type": signal.signal_type.value,
+                                    "score": signal.score.composite if signal.score else None,
+                                },
+                                {"source": "signal_engine"},
+                            )
 
-            # Phase 2: Cross-sectional selection
-            blocked_symbols = {s for s in state.universe if state_manager.blocks_entries(s)}
-            selected = portfolio_selector.select(
-                candidates=candidates,
-                current_positions=state.positions,
-                blocked_symbols=blocked_symbols,
-                state=state,
-            )
+                        # Handle exits immediately (they reduce position count)
+                        if signal.signal_type == SignalType.EXIT and open_position:
+                            exits += 1
+                            await execution_engine.execute_exit(
+                                open_position, signal.price, signal.reason or "EXIT"
+                            )
 
-            # Phase 3: Execute selected trades
-            executed_count = 0
-            for candidate in selected:
-                filters = parse_symbol_filters(symbol_filters_map.get(candidate.symbol, []))
-                await execution_engine.execute_entry(
-                    candidate.proposal,
-                    candidate.risk_result,
-                    filters,
-                    state,
+                        # Handle trailing stops for open positions
+                        if open_position:
+                            current_price = float(fourh_df["close"].iloc[-1])
+                            atr = signal.atr if signal else None
+                            if atr and atr > 0:
+                                filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
+                                tick_size = filters.tick_size if filters else 0.0001
+                                await execution_engine.update_trailing_stop(
+                                    open_position, current_price, atr, tick_size
+                                )
+
+                        # Collect entry candidates for cross-sectional selection
+                        if signal.signal_type in {SignalType.LONG, SignalType.SHORT}:
+                            filters = parse_symbol_filters(symbol_filters_map.get(symbol, []))
+                            proposal = TradeProposal(
+                                symbol=symbol,
+                                side="LONG"
+                                if signal.signal_type == SignalType.LONG
+                                else "SHORT",
+                                entry_price=signal.entry_price or signal.price,
+                                stop_price=signal.stop_price or signal.price,
+                                take_profit=signal.take_profit,
+                                atr=signal.atr,
+                                leverage=settings.risk.default_leverage,
+                                score=signal.score,
+                                funding_rate=funding_rate,
+                                news_risk=news_risk,
+                                trade_id=signal.trade_id or "",
+                                created_at=datetime.now(timezone.utc),
+                                candle_timestamp=fourh_df.index[-1].to_pydatetime(),
+                            )
+                            await event_bus.publish(
+                                EventType.TRADE_PROPOSED,
+                                {
+                                    "symbol": symbol,
+                                    "side": proposal.side,
+                                    "entry_price": proposal.entry_price,
+                                    "stop_price": proposal.stop_price,
+                                    "trade_id": proposal.trade_id,
+                                },
+                                {"source": "signal_engine"},
+                            )
+                            risk_result = risk_engine.evaluate(
+                                state=state,
+                                proposal=proposal,
+                                symbol_filters=filters,
+                                now=datetime.now(timezone.utc),
+                            )
+                            thinking_logger.log_risk(proposal, risk_result)
+                            if risk_result.circuit_breaker:
+                                await event_bus.publish(
+                                    EventType.CIRCUIT_BREAKER_TRIGGERED,
+                                    {"reason": "MAX_DRAWDOWN"},
+                                    {"source": "risk_engine"},
+                                )
+                                await _kill_switch(state_manager, execution_engine)
+                                continue
+                            if not risk_result.approved:
+                                rejections += 1
+                                await event_bus.publish(
+                                    EventType.RISK_REJECTED,
+                                    {"symbol": symbol, "reasons": risk_result.reasons},
+                                    {"source": "risk_engine"},
+                                )
+                                continue
+
+                            # Add to candidates for cross-sectional selection
+                            candidates.append(
+                                TradeCandidate(
+                                    symbol=symbol,
+                                    proposal=proposal,
+                                    risk_result=risk_result,
+                                    score=signal.score,
+                                    funding_rate=funding_rate,
+                                    news_risk=news_risk,
+                                    candle_timestamp=candle_close,
+                                )
+                            )
+                    except Exception as exc:
+                        log.warning("strategy_symbol_failed", symbol=symbol, error=str(exc))
+                        continue
+
+                # Phase 2: Cross-sectional selection
+                blocked_symbols = {s for s in state.universe if state_manager.blocks_entries(s)}
+                selected = portfolio_selector.select(
+                    candidates=candidates,
+                    current_positions=state.positions,
+                    blocked_symbols=blocked_symbols,
+                    state=state,
                 )
-                executed_count += 1
+
+                # Phase 3: Execute selected trades
+                executed_count = 0
+                skipped_count = 0
+                for candidate in selected:
+                    filters = parse_symbol_filters(symbol_filters_map.get(candidate.symbol, []))
+                    result = await execution_engine.execute_entry(
+                        candidate.proposal,
+                        candidate.risk_result,
+                        filters,
+                        state,
+                    )
+                    if result.placed:
+                        executed_count += 1
+                        await event_bus.publish(
+                            EventType.RISK_APPROVED,
+                            {"symbol": candidate.symbol, "trade_id": candidate.proposal.trade_id},
+                            {"source": "portfolio_selector"},
+                        )
+                    else:
+                        skipped_count += 1
+
+                # Phase 4: Emit cycle summary event
+                ineligible_reasons: dict[str, str] = {}
+                for c in candidates:
+                    if not c.selected and c.rank is not None:
+                        # Determine why not selected
+                        if c.symbol in blocked_symbols:
+                            ineligible_reasons[c.symbol] = f"news_blocked ({c.news_risk})"
+                        elif c.symbol in state.positions:
+                            ineligible_reasons[c.symbol] = "already_have_position"
+                        else:
+                            # Check if we hit max positions
+                            current_entry_count = sum(
+                                1
+                                for pos in state.positions.values()
+                                if pos.symbol not in blocked_symbols
+                            )
+                            if current_entry_count >= settings.risk.max_positions:
+                                ineligible_reasons[c.symbol] = (
+                                    f"max_positions_reached "
+                                    f"({current_entry_count}/{settings.risk.max_positions})"
+                                )
+                            else:
+                                ineligible_reasons[c.symbol] = (
+                                    f"rank_too_low ({c.rank} > {settings.risk.max_positions})"
+                                )
+
+                summary = portfolio_selector.get_selection_summary(
+                    candidates, selected, ineligible_reasons
+                )
                 await event_bus.publish(
-                    EventType.RISK_APPROVED,
-                    {"symbol": candidate.symbol, "trade_id": candidate.proposal.trade_id},
+                    EventType.TRADE_CYCLE_COMPLETED,
+                    summary,
                     {"source": "portfolio_selector"},
                 )
 
-            # Phase 4: Emit cycle summary event
-            ineligible_reasons: dict[str, str] = {}
-            for c in candidates:
-                if not c.selected and c.rank is not None:
-                    # Determine why not selected
-                    if c.symbol in blocked_symbols:
-                        ineligible_reasons[c.symbol] = f"news_blocked ({c.news_risk})"
-                    elif c.symbol in state.positions:
-                        ineligible_reasons[c.symbol] = "already_have_position"
-                    else:
-                        # Check if we hit max positions
-                        current_entry_count = sum(
-                            1
-                            for pos in state.positions.values()
-                            if pos.symbol not in blocked_symbols
-                        )
-                        if current_entry_count >= settings.risk.max_positions:
-                            ineligible_reasons[c.symbol] = (
-                                f"max_positions_reached "
-                                f"({current_entry_count}/{settings.risk.max_positions})"
-                            )
-                        else:
-                            ineligible_reasons[c.symbol] = (
-                                f"rank_too_low ({c.rank} > {settings.risk.max_positions})"
-                            )
-
-            summary = portfolio_selector.get_selection_summary(
-                candidates, selected, ineligible_reasons
-            )
-            await event_bus.publish(
-                EventType.TRADE_CYCLE_COMPLETED,
-                summary,
-                {"source": "portfolio_selector"},
-            )
-
-            metrics.update_state(state_manager.state)
-            log.info(
-                "strategy_cycle_complete",
-                universe=len(state.universe),
-                signals=signals,
-                candidates=len(candidates),
-                selected=executed_count,
-                rejections=rejections,
-                exits=exits,
-            )
-            await asyncio.sleep(60 * 15)
+                metrics.update_state(state_manager.state)
+                log.info(
+                    "strategy_cycle_complete",
+                    universe=len(state.universe),
+                    signals=signals,
+                    candidates=len(candidates),
+                    selected=executed_count,
+                    skipped=skipped_count,
+                    rejections=rejections,
+                    exits=exits,
+                )
+                await asyncio.sleep(60 * 15)
+            except Exception as exc:
+                log.warning("strategy_loop_error", error=str(exc))
+                await asyncio.sleep(60)
 
     async def watchdog_loop() -> None:
         """Periodic watchdog to verify protective orders are on-exchange."""
+        last_tick = time.time()
         while True:
+            now = time.time()
+            metrics.loop_last_tick_age_sec.labels(loop="watchdog").set(now - last_tick)
+            last_tick = now
             try:
                 await execution_engine.verify_protective_orders(state_manager.state)
             except Exception as exc:
@@ -559,21 +640,36 @@ async def main_async() -> None:
 
     async def api_server() -> None:
         """Run the operator API server."""
-        config = uvicorn.Config(
-            create_app(),
-            host="127.0.0.1",
-            port=settings.monitoring.api_port,
-            log_level="info",
-        )
-        server = uvicorn.Server(config)
-        await server.serve()
+        try:
+            config = uvicorn.Config(
+                create_app(
+                    event_bus=event_bus,
+                    state_manager=state_manager,
+                    ledger=ledger,
+                    settings=settings,
+                ),
+                host="127.0.0.1",
+                port=settings.monitoring.api_port,
+                log_level="info",
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+        except Exception as exc:
+            log.warning("api_server_failed", error=str(exc))
 
     async def telemetry_loop() -> None:
         """Periodic telemetry updates and daily summary generation."""
         last_daily_summary_date: str | None = None
+        last_tick = time.time()
         while True:
+            now = time.time()
+            metrics.loop_last_tick_age_sec.labels(loop="telemetry").set(now - last_tick)
+            last_tick = now
             try:
                 # Update metrics every 5 minutes
+                ws_age = user_stream.last_message_age_sec()
+                if ws_age is not None:
+                    metrics.ws_last_message_age_sec.set(ws_age)
                 await telemetry.update_metrics()
 
                 # Check if we need to generate daily summary (at UTC 00:00)
@@ -596,6 +692,7 @@ async def main_async() -> None:
         watchdog_loop(),
         api_server(),
         telemetry_loop(),
+        return_exceptions=True,
     )
 
 

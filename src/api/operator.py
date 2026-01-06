@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import FastAPI, Query
 
 from src.config.settings import Settings, load_settings
-from src.ledger import EventLedger, EventType, StateManager
+from src.ledger import EventBus, EventLedger, EventType, StateManager
 from src.ledger.events import Event
 from src.ledger.state import TradingState
 
@@ -121,7 +121,13 @@ async def lifespan(app: FastAPI) -> Any:
     yield
 
 
-def create_app() -> FastAPI:
+def create_app(
+    *,
+    event_bus: EventBus | None = None,
+    state_manager: StateManager | None = None,
+    ledger: EventLedger | None = None,
+    settings: Settings | None = None,
+) -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
         title="Trading Bot Operator API",
@@ -130,18 +136,27 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    def _get_runtime() -> tuple[Settings, EventLedger, StateManager, EventBus | None]:
+        if event_bus is not None and state_manager is not None and ledger is not None:
+            runtime_settings = settings or load_settings()
+            return runtime_settings, ledger, state_manager, event_bus
+        local_settings, local_ledger, local_state = _get_instances()
+        return local_settings, local_ledger, local_state, None
+
     @app.get("/health")
     async def health() -> dict[str, Any]:
         """Get system health status."""
-        settings, _, _ = _get_instances()
+        settings, _, runtime_state, _ = _get_runtime()
         uptime_sec = time.time() - _start_time
         ws_msg_age_sec = time.time() - _ws_last_msg_time if _ws_last_msg_time > 0 else None
 
         # Determine trading enabled status
         trading_enabled = (
-            settings.run.enable_trading and
-            settings.run.mode in ("testnet", "live") and
-            not _state_manager.state.circuit_breaker_active if _state_manager else False
+            settings.run.enable_trading
+            and settings.run.mode in ("testnet", "live")
+            and not runtime_state.state.circuit_breaker_active
+            if runtime_state
+            else False
         )
 
         return {
@@ -158,38 +173,45 @@ def create_app() -> FastAPI:
     @app.get("/state")
     async def get_state() -> dict[str, Any]:
         """Get current trading state."""
-        _, _, state_manager = _get_instances()
-        return _serialize_state(state_manager.state)
+        _, ledger, runtime_state, runtime_bus = _get_runtime()
+        if runtime_bus is None:
+            runtime_state.rebuild(ledger.load_all())
+        return _serialize_state(runtime_state.state)
 
     @app.get("/events")
     async def get_events(
         tail: int = Query(default=100, ge=1, le=1000, description="Number of recent events"),
     ) -> dict[str, Any]:
         """Get recent events from the ledger."""
-        _, ledger, _ = _get_instances()
-        all_events = list(ledger.iter_events())
-        recent_events = all_events[-tail:] if tail < len(all_events) else all_events
+        _, ledger, _, _ = _get_runtime()
+        recent_events = list(ledger.iter_events_tail(tail))
         return {
             "count": len(recent_events),
-            "total": len(all_events),
+            "total": ledger.last_sequence(),
             "events": [_serialize_event(e) for e in recent_events],
         }
 
     @app.post("/actions/ack-manual-review")
     async def ack_manual_review(reason: str = Query(default="operator_api")) -> dict[str, Any]:
         """Acknowledge manual review and clear the flag."""
-        settings, ledger, state_manager = _get_instances()
+        settings, ledger, runtime_state, runtime_bus = _get_runtime()
 
-        was_flagged = state_manager.state.requires_manual_review
+        was_flagged = runtime_state.state.requires_manual_review
 
-        ledger.append(
-            EventType.MANUAL_REVIEW_ACKNOWLEDGED,
-            {"reason": reason, "previously_flagged": was_flagged},
-            {"source": "operator_api"},
-        )
-
-        # Rebuild state to reflect the change
-        state_manager.rebuild(ledger.load_all())
+        if runtime_bus is not None:
+            await runtime_bus.publish(
+                EventType.MANUAL_REVIEW_ACKNOWLEDGED,
+                {"reason": reason, "previously_flagged": was_flagged},
+                {"source": "operator_api"},
+            )
+        else:
+            ledger.append(
+                EventType.MANUAL_REVIEW_ACKNOWLEDGED,
+                {"reason": reason, "previously_flagged": was_flagged},
+                {"source": "operator_api"},
+            )
+            # Rebuild state to reflect the change
+            runtime_state.rebuild(ledger.load_all())
 
         if was_flagged:
             msg = "Manual review acknowledged. Restart bot or wait for next reconciliation."
@@ -205,13 +227,20 @@ def create_app() -> FastAPI:
     @app.post("/actions/kill-switch")
     async def kill_switch(reason: str = Query(default="operator_kill_switch")) -> dict[str, Any]:
         """Trigger system shutdown event (kill switch)."""
-        settings, ledger, state_manager = _get_instances()
+        settings, ledger, _, runtime_bus = _get_runtime()
 
-        ledger.append(
-            EventType.SYSTEM_STOPPED,
-            {"reason": reason, "initiated_by": "operator_api"},
-            {"source": "operator_api", "kill_switch": True},
-        )
+        if runtime_bus is not None:
+            await runtime_bus.publish(
+                EventType.SYSTEM_STOPPED,
+                {"reason": reason, "initiated_by": "operator_api"},
+                {"source": "operator_api", "kill_switch": True},
+            )
+        else:
+            ledger.append(
+                EventType.SYSTEM_STOPPED,
+                {"reason": reason, "initiated_by": "operator_api"},
+                {"source": "operator_api", "kill_switch": True},
+            )
 
         return {
             "success": True,
@@ -225,7 +254,7 @@ def create_app() -> FastAPI:
         duration_hours: int = Query(default=4, ge=1, le=48),
     ) -> dict[str, Any]:
         """Pause trading by setting cooldown period."""
-        settings, ledger, state_manager = _get_instances()
+        settings, ledger, runtime_state, runtime_bus = _get_runtime()
 
         now = datetime.now(timezone.utc)
         from datetime import timedelta
@@ -235,19 +264,31 @@ def create_app() -> FastAPI:
         # Record the cooldown by appending a dummy event that triggers cooldown logic
         # We use MANUAL_INTERVENTION to trigger the cooldown handler if needed
         # Or we can just set cooldown_until directly and record it
-        ledger.append(
-            EventType.MANUAL_INTERVENTION,
-            {
-                "action": "OPERATOR_PAUSE",
-                "reason": reason,
-                "cooldown_until": cooldown_until.isoformat(),
-                "duration_hours": duration_hours,
-            },
-            {"source": "operator_api"},
-        )
+        if runtime_bus is not None:
+            await runtime_bus.publish(
+                EventType.MANUAL_INTERVENTION,
+                {
+                    "action": "OPERATOR_PAUSE",
+                    "reason": reason,
+                    "cooldown_until": cooldown_until.isoformat(),
+                    "duration_hours": duration_hours,
+                },
+                {"source": "operator_api"},
+            )
+        else:
+            ledger.append(
+                EventType.MANUAL_INTERVENTION,
+                {
+                    "action": "OPERATOR_PAUSE",
+                    "reason": reason,
+                    "cooldown_until": cooldown_until.isoformat(),
+                    "duration_hours": duration_hours,
+                },
+                {"source": "operator_api"},
+            )
 
-        # Manually set the cooldown in state
-        state_manager.state.cooldown_until = cooldown_until
+        # Manually set the cooldown in state for immediate effect
+        runtime_state.state.cooldown_until = cooldown_until
 
         return {
             "success": True,
@@ -259,22 +300,29 @@ def create_app() -> FastAPI:
     @app.post("/actions/resume")
     async def resume(reason: str = Query(default="operator_resume")) -> dict[str, Any]:
         """Resume trading by clearing cooldown and manual review."""
-        settings, ledger, state_manager = _get_instances()
+        settings, ledger, runtime_state, runtime_bus = _get_runtime()
 
-        was_in_cooldown = state_manager.state.cooldown_until is not None
-        was_manual_review = state_manager.state.requires_manual_review
+        was_in_cooldown = runtime_state.state.cooldown_until is not None
+        was_manual_review = runtime_state.state.requires_manual_review
 
         # Clear the cooldown
-        state_manager.state.cooldown_until = None
+        runtime_state.state.cooldown_until = None
 
         # Clear manual review flag
-        if state_manager.state.requires_manual_review:
-            ledger.append(
-                EventType.MANUAL_REVIEW_ACKNOWLEDGED,
-                {"reason": reason, "previously_flagged": True},
-                {"source": "operator_api"},
-            )
-            state_manager.state.requires_manual_review = False
+        if runtime_state.state.requires_manual_review:
+            if runtime_bus is not None:
+                await runtime_bus.publish(
+                    EventType.MANUAL_REVIEW_ACKNOWLEDGED,
+                    {"reason": reason, "previously_flagged": True},
+                    {"source": "operator_api"},
+                )
+            else:
+                ledger.append(
+                    EventType.MANUAL_REVIEW_ACKNOWLEDGED,
+                    {"reason": reason, "previously_flagged": True},
+                    {"source": "operator_api"},
+                )
+                runtime_state.state.requires_manual_review = False
 
         return {
             "success": True,

@@ -69,12 +69,15 @@ risk:
 universe:
   min_quote_volume_usd: 50000000
   size: 5
+  refresh_interval_hours: 24
+  retry_interval_minutes: 5
 news:
   enabled: true
   poll_interval_minutes: 15
   max_age_hours: 24
   high_risk_block_hours: 24
   medium_risk_block_hours: 6
+  source_timeout_sec: 10
   sources:
   - url: https://www.coindesk.com/arc/outboundfeeds/rss/
     name: coindesk
@@ -85,6 +88,9 @@ llm:
   max_tokens: 500
   temperature: 0.1
   rate_limit_per_minute: 10
+  request_timeout_sec: 20
+  retry_attempts: 2
+  retry_backoff_sec: 1.0
 execution:
   max_slippage_pct: 0.5
   limit_order_buffer_pct: 0.05
@@ -107,6 +113,13 @@ monitoring:
   log_http: false
   log_http_responses: false
   log_http_max_body_chars: 1000
+  error_log_max_bytes: 5000000
+  error_log_backup_count: 3
+reconciliation:
+  enabled: true
+  interval_minutes: 30
+  failure_threshold: 3
+  allow_in_paper: false
 watchdog:
   enabled: true
   interval_sec: 300

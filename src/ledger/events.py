@@ -23,6 +23,7 @@ class EventType(str, Enum):
     TRADE_PROPOSED = "TradeProposed"
     RISK_APPROVED = "RiskApproved"
     RISK_REJECTED = "RiskRejected"
+    ENTRY_SKIPPED = "EntrySkipped"
     ORDER_PLACED = "OrderPlaced"
     ORDER_CANCELLED = "OrderCancelled"
     ORDER_EXPIRED = "OrderExpired"

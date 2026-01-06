@@ -26,6 +26,10 @@ class FeaturePipeline:
 
     def compute(self, df: pd.DataFrame) -> pd.DataFrame:
         """Return a new DataFrame with indicator columns appended."""
+        required_cols = {"open", "high", "low", "close"}
+        missing = required_cols.difference(df.columns)
+        if missing:
+            raise ValueError(f"missing_columns: {sorted(missing)}")
         result = df.copy()
         result["ema_fast"] = calculate_ema(result["close"], self._indicators.ema_fast)
         result["ema_slow"] = calculate_ema(result["close"], self._indicators.ema_slow)

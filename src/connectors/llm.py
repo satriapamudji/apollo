@@ -7,6 +7,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
+
 from src.config.settings import LLMConfig
 from src.connectors.news import NewsItem
 
@@ -44,20 +46,14 @@ class LLMClassifier:
         self.api_key = api_key
         self._cache: dict[str, LLMResult] = {}
         self._call_times: list[float] = []
+        self._log = structlog.get_logger(__name__)
 
     async def classify(self, item: NewsItem) -> LLMResult:
         cache_key = self._cache_key(item)
         if cache_key in self._cache:
             return self._cache[cache_key]
         await self._rate_limit()
-        if self.config.provider == "local":
-            result = self._local_stub(item)
-        elif self.config.provider == "openai":
-            result = await self._classify_openai(item)
-        elif self.config.provider == "anthropic":
-            result = await self._classify_anthropic(item)
-        else:
-            result = self._local_stub(item)
+        result = await self._classify_with_retries(item)
         self._cache[cache_key] = result
         return result
 
@@ -140,6 +136,35 @@ class LLMClassifier:
         content = response.content[0].text if response.content else "{}"
         return self._parse_response(content)
 
+    async def _classify_with_retries(self, item: NewsItem) -> LLMResult:
+        if self.config.provider == "local":
+            return self._local_stub(item)
+        retries = max(0, self.config.retry_attempts)
+        backoff = self.config.retry_backoff_sec
+        for attempt in range(retries + 1):
+            try:
+                if self.config.provider == "openai":
+                    return await asyncio.wait_for(
+                        self._classify_openai(item),
+                        timeout=self.config.request_timeout_sec,
+                    )
+                if self.config.provider == "anthropic":
+                    return await asyncio.wait_for(
+                        self._classify_anthropic(item),
+                        timeout=self.config.request_timeout_sec,
+                    )
+                return self._local_stub(item)
+            except Exception as exc:
+                self._log.warning(
+                    "llm_classify_failed",
+                    provider=self.config.provider,
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
+                if attempt < retries:
+                    await asyncio.sleep(backoff * (2**attempt))
+        return self._local_stub(item)
+
     def _parse_response(self, raw: str) -> LLMResult:
         import json
 
@@ -155,12 +180,34 @@ class LLMClassifier:
                 confidence=0.0,
                 summary=raw[:200],
             )
+        event_type = str(data.get("event_type", "other")).lower()
+        if event_type not in {"regulatory", "exchange", "technical", "macro", "project", "other"}:
+            event_type = "other"
+        sentiment = str(data.get("sentiment", "neutral")).lower()
+        if sentiment not in {"bullish", "bearish", "neutral"}:
+            sentiment = "neutral"
+        risk_level = str(data.get("risk_level", "LOW")).upper()
+        if risk_level not in {"HIGH", "MEDIUM", "LOW"}:
+            risk_level = "LOW"
+        symbols = data.get("symbols_mentioned", [])
+        if not isinstance(symbols, list):
+            symbols = []
+        symbols = [str(s) for s in symbols if s]
         return LLMResult(
-            event_type=data.get("event_type", "other"),
-            symbols_mentioned=data.get("symbols_mentioned", []),
-            sentiment=data.get("sentiment", "neutral"),
-            risk_level=data.get("risk_level", "LOW"),
+            event_type=event_type,
+            symbols_mentioned=symbols,
+            sentiment=sentiment,
+            risk_level=risk_level,
             risk_reason=data.get("risk_reason"),
-            confidence=float(data.get("confidence", 0.0)),
-            summary=data.get("summary", "")[:200],
+            confidence=self._safe_float(data.get("confidence", 0.0)),
+            summary=str(data.get("summary", ""))[:200],
         )
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default

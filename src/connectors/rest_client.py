@@ -6,13 +6,16 @@ import asyncio
 import hmac
 import time
 from hashlib import sha256
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from urllib.parse import urlencode
 
 import httpx
 import structlog
 
 from src.config.settings import Settings
+
+if TYPE_CHECKING:
+    from src.monitoring.metrics import Metrics
 
 
 class RateLimitTracker:
@@ -73,6 +76,7 @@ class BinanceRestClient:
         # Last rate-limit header values
         self._last_order_count_10s: int | None = None
         self._last_order_count_1m: int | None = None
+        self._metrics: Metrics | None = None
         self.log = structlog.get_logger(__name__)
 
     async def close(self) -> None:
@@ -108,6 +112,10 @@ class BinanceRestClient:
         """Get the current server time offset in milliseconds."""
         return self._server_time_offset
 
+    def set_metrics(self, metrics: "Metrics") -> None:
+        """Attach metrics for REST telemetry updates."""
+        self._metrics = metrics
+
     def _update_rate_limit_headers(self, response: httpx.Response) -> None:
         """Extract and store rate-limit headers from response."""
         # Update server-reported weight
@@ -130,13 +138,22 @@ class BinanceRestClient:
             except ValueError:
                 pass
 
+        if self._metrics is not None:
+            self._metrics.binance_used_weight_1m.set(self.rate_limiter.current_weight)
+            if self._last_order_count_10s is not None:
+                self._metrics.binance_order_count_10s.set(self._last_order_count_10s)
+            if self._last_order_count_1m is not None:
+                self._metrics.binance_order_count_1m.set(self._last_order_count_1m)
+
     async def get_exchange_info(self) -> dict[str, Any]:
         data = await self._market_request("GET", "/fapi/v1/exchangeInfo", weight=10)
+        data = self._ensure_dict(data, "exchangeInfo")
         self._update_rate_limits(data.get("rateLimits", []))
         return data
 
     async def get_24h_tickers(self) -> list[dict[str, Any]]:
-        return await self._market_request("GET", "/fapi/v1/ticker/24hr", weight=40)
+        data = await self._market_request("GET", "/fapi/v1/ticker/24hr", weight=40)
+        return [t for t in self._ensure_list(data, "ticker/24hr") if isinstance(t, dict)]
 
     async def get_klines(
         self,
@@ -151,11 +168,17 @@ class BinanceRestClient:
             params["startTime"] = start_time
         if end_time:
             params["endTime"] = end_time
-        return await self._market_request("GET", "/fapi/v1/klines", params=params, weight=1)
+        data = await self._market_request("GET", "/fapi/v1/klines", params=params, weight=1)
+        return [row for row in self._ensure_list(data, "klines") if isinstance(row, list)]
 
-    async def get_mark_price(self, symbol: str | None = None) -> dict[str, Any]:
+    async def get_mark_price(
+        self, symbol: str | None = None
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         params = {"symbol": symbol} if symbol else None
-        return await self._market_request("GET", "/fapi/v1/premiumIndex", params=params, weight=1)
+        data = await self._market_request("GET", "/fapi/v1/premiumIndex", params=params, weight=1)
+        if symbol:
+            return self._ensure_dict(data, "premiumIndex")
+        return data
 
     async def get_funding_rate(self, symbol: str) -> float:
         data = await self.get_mark_price(symbol)
@@ -271,9 +294,13 @@ class BinanceRestClient:
     async def get_book_ticker(self, symbol: str) -> dict[str, Any]:
         """Get best bid/ask prices for a symbol from the book ticker endpoint."""
         params = {"symbol": symbol}
-        return await self._market_request(
+        data = await self._market_request(
             "GET", "/fapi/v1/ticker/bookTicker", params=params, weight=1
         )
+        data = self._ensure_dict(data, "bookTicker")
+        if "bidPrice" not in data or "askPrice" not in data:
+            raise ValueError("bookTicker response missing bidPrice/askPrice")
+        return data
 
     async def get_spread_pct(self, symbol: str) -> float:
         """Return current spread as percentage of mid price.
@@ -416,6 +443,7 @@ class BinanceRestClient:
         max_body_chars = self.settings.monitoring.log_http_max_body_chars
         safe_params = self._sanitize_params(params)
 
+        last_exc: Exception | None = None
         for attempt in range(3):
             start = time.perf_counter()
             try:
@@ -432,6 +460,9 @@ class BinanceRestClient:
                 response = await self.http.request(method, path, params=params, headers=headers)
                 latency_ms = (time.perf_counter() - start) * 1000
                 if response.status_code == 429:
+                    if self._metrics is not None:
+                        self._metrics.binance_request_throttled_total.labels(endpoint=path).inc()
+                        self._metrics.rest_error_rate.inc()
                     if log_http:
                         self.log.warning(
                             "rest_rate_limited",
@@ -443,9 +474,18 @@ class BinanceRestClient:
                     await asyncio.sleep(2**attempt)
                     continue
                 response.raise_for_status()
-                data = response.json()
+                data = self._parse_json_response(
+                    response,
+                    method,
+                    path,
+                    log_http=log_http,
+                    max_body_chars=max_body_chars,
+                    latency_ms=latency_ms,
+                )
                 # Update rate-limit headers from response
                 self._update_rate_limit_headers(response)
+                if self._metrics is not None:
+                    self._metrics.rest_request_latency_ms.observe(latency_ms)
                 if log_http:
                     payload: dict[str, Any] = {
                         "method": method,
@@ -460,8 +500,13 @@ class BinanceRestClient:
                     self.log.info("rest_response", **payload)
                 return data
             except httpx.HTTPStatusError as exc:
+                last_exc = exc
                 latency_ms = (time.perf_counter() - start) * 1000
+                if self._metrics is not None:
+                    self._metrics.rest_error_rate.inc()
                 if exc.response.status_code in {429, 418, 500, 502, 503}:
+                    if self._metrics is not None:
+                        self._metrics.binance_request_retry_total.labels(endpoint=path).inc()
                     if log_http:
                         self.log.warning(
                             "rest_http_error_retrying",
@@ -484,7 +529,11 @@ class BinanceRestClient:
                     )
                 raise
             except httpx.RequestError as exc:
+                last_exc = exc
                 latency_ms = (time.perf_counter() - start) * 1000
+                if self._metrics is not None:
+                    self._metrics.rest_error_rate.inc()
+                    self._metrics.binance_request_retry_total.labels(endpoint=path).inc()
                 if log_http:
                     self.log.warning(
                         "rest_request_error_retrying",
@@ -495,17 +544,25 @@ class BinanceRestClient:
                     )
                 await asyncio.sleep(2**attempt)
                 continue
-        response = await self.http.request(method, path, params=params, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        if log_http:
-            self.log.info(
-                "rest_response",
-                method=method,
-                path=path,
-                status_code=response.status_code,
-            )
-        return data
+            except ValueError as exc:
+                last_exc = exc
+                latency_ms = (time.perf_counter() - start) * 1000
+                if self._metrics is not None:
+                    self._metrics.rest_error_rate.inc()
+                    self._metrics.binance_request_retry_total.labels(endpoint=path).inc()
+                if log_http:
+                    self.log.warning(
+                        "rest_response_invalid_retrying",
+                        method=method,
+                        path=path,
+                        latency_ms=round(latency_ms, 2),
+                        error=str(exc),
+                    )
+                await asyncio.sleep(2**attempt)
+                continue
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("rest_request_failed")
 
     async def _market_request(
         self,
@@ -527,6 +584,7 @@ class BinanceRestClient:
         max_body_chars = self.settings.monitoring.log_http_max_body_chars
         safe_params = self._sanitize_params(params)
 
+        last_exc: Exception | None = None
         for attempt in range(3):
             start = time.perf_counter()
             try:
@@ -544,6 +602,9 @@ class BinanceRestClient:
                 )
                 latency_ms = (time.perf_counter() - start) * 1000
                 if response.status_code == 429:
+                    if self._metrics is not None:
+                        self._metrics.binance_request_throttled_total.labels(endpoint=path).inc()
+                        self._metrics.rest_error_rate.inc()
                     if log_http:
                         self.log.warning(
                             "rest_market_rate_limited",
@@ -555,9 +616,18 @@ class BinanceRestClient:
                     await asyncio.sleep(2**attempt)
                     continue
                 response.raise_for_status()
-                data = response.json()
+                data = self._parse_json_response(
+                    response,
+                    method,
+                    path,
+                    log_http=log_http,
+                    max_body_chars=max_body_chars,
+                    latency_ms=latency_ms,
+                )
                 # Update rate-limit headers from response
                 self._update_rate_limit_headers(response)
+                if self._metrics is not None:
+                    self._metrics.rest_request_latency_ms.observe(latency_ms)
                 if log_http:
                     payload: dict[str, Any] = {
                         "method": method,
@@ -572,8 +642,13 @@ class BinanceRestClient:
                     self.log.info("rest_market_response", **payload)
                 return data
             except httpx.HTTPStatusError as exc:
+                last_exc = exc
                 latency_ms = (time.perf_counter() - start) * 1000
+                if self._metrics is not None:
+                    self._metrics.rest_error_rate.inc()
                 if exc.response.status_code in {429, 418, 500, 502, 503}:
+                    if self._metrics is not None:
+                        self._metrics.binance_request_retry_total.labels(endpoint=path).inc()
                     if log_http:
                         self.log.warning(
                             "rest_market_http_error_retrying",
@@ -596,7 +671,11 @@ class BinanceRestClient:
                     )
                 raise
             except httpx.RequestError as exc:
+                last_exc = exc
                 latency_ms = (time.perf_counter() - start) * 1000
+                if self._metrics is not None:
+                    self._metrics.rest_error_rate.inc()
+                    self._metrics.binance_request_retry_total.labels(endpoint=path).inc()
                 if log_http:
                     self.log.warning(
                         "rest_market_request_error_retrying",
@@ -607,16 +686,63 @@ class BinanceRestClient:
                     )
                 await asyncio.sleep(2**attempt)
                 continue
-        response = await self.market_http.request(method, path, params=params, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        if log_http:
-            self.log.info(
-                "rest_market_response",
-                method=method,
-                path=path,
-                status_code=response.status_code,
-            )
+            except ValueError as exc:
+                last_exc = exc
+                latency_ms = (time.perf_counter() - start) * 1000
+                if self._metrics is not None:
+                    self._metrics.rest_error_rate.inc()
+                    self._metrics.binance_request_retry_total.labels(endpoint=path).inc()
+                if log_http:
+                    self.log.warning(
+                        "rest_market_response_invalid_retrying",
+                        method=method,
+                        path=path,
+                        latency_ms=round(latency_ms, 2),
+                        error=str(exc),
+                    )
+                await asyncio.sleep(2**attempt)
+                continue
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("rest_market_request_failed")
+
+    def _parse_json_response(
+        self,
+        response: httpx.Response,
+        method: str,
+        path: str,
+        *,
+        log_http: bool,
+        max_body_chars: int,
+        latency_ms: float | None = None,
+    ) -> Any:
+        try:
+            return response.json()
+        except ValueError as exc:
+            if log_http:
+                payload: dict[str, Any] = {
+                    "method": method,
+                    "path": path,
+                    "status_code": response.status_code,
+                    "error": str(exc),
+                }
+                if latency_ms is not None:
+                    payload["latency_ms"] = round(latency_ms, 2)
+                if max_body_chars > 0:
+                    payload["response_preview"] = self._truncate(response.text, max_body_chars)
+                self.log.error("rest_response_decode_failed", **payload)
+            raise
+
+    @staticmethod
+    def _ensure_dict(data: Any, endpoint: str) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ValueError(f"{endpoint} response is not a dict")
+        return data
+
+    @staticmethod
+    def _ensure_list(data: Any, endpoint: str) -> list[Any]:
+        if not isinstance(data, list):
+            raise ValueError(f"{endpoint} response is not a list")
         return data
 
     @staticmethod

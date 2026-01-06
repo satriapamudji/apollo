@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import orjson
+import structlog
 
 
 class PendingEntryStore:
@@ -15,6 +16,7 @@ class PendingEntryStore:
         self.state_path = Path(state_path)
         self.state_path.mkdir(parents=True, exist_ok=True)
         self._file = self.state_path / "pending_entries.jsonl"
+        self._log = structlog.get_logger(__name__)
 
     def save(self, client_order_id: str, context: dict[str, Any]) -> None:
         """Persist a pending entry context."""
@@ -45,6 +47,7 @@ class PendingEntryStore:
                 data = orjson.loads(f.read())
             return data if isinstance(data, dict) else {}
         except Exception:
+            self._log.exception("pending_entries_load_failed", path=str(self._file))
             return {}
 
     def _save_all(self, entries: dict[str, dict[str, Any]]) -> None:

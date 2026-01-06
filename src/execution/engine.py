@@ -51,6 +51,12 @@ class PendingEntry:
     original_client_order_id: str | None = None
 
 
+@dataclass(frozen=True)
+class EntryExecutionResult:
+    placed: bool
+    reason: str | None = None
+
+
 class ExecutionEngine:
     """Submit and monitor orders after risk approval."""
 
@@ -108,12 +114,19 @@ class ExecutionEngine:
         risk_result: RiskCheckResult,
         symbol_filters: SymbolFilters,
         state: TradingState,
-    ) -> None:
+    ) -> EntryExecutionResult:
         if not risk_result.approved or not proposal.is_entry:
-            return
+            return EntryExecutionResult(placed=False, reason="NOT_APPROVED")
         if risk_result.adjusted_entry_threshold and proposal.score:
             if proposal.score.composite < risk_result.adjusted_entry_threshold:
-                return
+                return await self._skip_entry(
+                    proposal,
+                    "ENTRY_SCORE_BELOW_THRESHOLD",
+                    {
+                        "score": proposal.score.composite,
+                        "threshold": risk_result.adjusted_entry_threshold,
+                    },
+                )
 
         adjusted_stop = proposal.stop_price
         if risk_result.adjusted_stop_multiplier and proposal.atr > 0:
@@ -132,7 +145,7 @@ class ExecutionEngine:
             leverage=proposal.leverage,
         )
         if not sizing:
-            return
+            return await self._skip_entry(proposal, "SIZING_FAILED")
 
         quantity = sizing.quantity * risk_result.size_multiplier
         if symbol_filters.step_size > 0:
@@ -141,16 +154,32 @@ class ExecutionEngine:
                 (Decimal(str(quantity)) / step).to_integral_value(rounding=ROUND_DOWN) * step
             )
         if quantity < symbol_filters.min_qty:
-            return
+            return await self._skip_entry(
+                proposal,
+                "MIN_QTY_NOT_MET",
+                {"quantity": quantity, "min_qty": symbol_filters.min_qty},
+            )
         if quantity * proposal.entry_price < symbol_filters.min_notional:
-            return
+            return await self._skip_entry(
+                proposal,
+                "MIN_NOTIONAL_NOT_MET",
+                {
+                    "quantity": quantity,
+                    "entry_price": proposal.entry_price,
+                    "min_notional": symbol_filters.min_notional,
+                },
+            )
         if quantity <= 0:
-            return
+            return await self._skip_entry(
+                proposal,
+                "NON_POSITIVE_QUANTITY",
+                {"quantity": quantity},
+            )
         if any(
             existing.symbol == proposal.symbol and not existing.reduce_only
             for existing in state.open_orders.values()
         ):
-            return
+            return await self._skip_entry(proposal, "OPEN_ORDER_EXISTS")
 
         # Check spread and slippage constraints before proceeding
         is_acceptable, rejection_reason = await self._check_spread_slippage(
@@ -177,7 +206,11 @@ class ExecutionEngine:
                 reason=rejection_reason,
                 trade_id=proposal.trade_id,
             )
-            return
+            return await self._skip_entry(
+                proposal,
+                "MICROSTRUCTURE_REJECTED",
+                {"reason_detail": rejection_reason},
+            )
 
         # Check for existing pending entry from the same candle (lifecycle tracking)
         if self.config.entry_lifecycle_enabled and proposal.candle_timestamp:
@@ -193,13 +226,13 @@ class ExecutionEngine:
                     trade_id=proposal.trade_id,
                 )
                 # Resume tracking - don't place a new order
-                return
+                return await self._skip_entry(proposal, "PENDING_ENTRY_EXISTS")
 
         await self._ensure_account_settings(proposal.symbol, proposal.leverage)
 
         client_order_id = self._client_order_id(proposal.symbol, proposal.side)
         if client_order_id in state.open_orders:
-            return
+            return await self._skip_entry(proposal, "DUPLICATE_CLIENT_ORDER_ID")
 
         order_type = "LIMIT"
         price = self._limit_price(proposal.entry_price, proposal.side, symbol_filters.tick_size)
@@ -233,7 +266,7 @@ class ExecutionEngine:
                 error=error_text,
                 status_code=getattr(exc.response, "status_code", None),
             )
-            return
+            return EntryExecutionResult(placed=False, reason="ORDER_PLACE_FAILED")
         except httpx.RequestError as exc:
             error_text = str(exc)
             await self.event_bus.publish(
@@ -246,7 +279,7 @@ class ExecutionEngine:
                 {"source": "execution_engine", "trade_id": proposal.trade_id},
             )
             self.log.warning("order_submit_failed", symbol=order.symbol, error=error_text)
-            return
+            return EntryExecutionResult(placed=False, reason="ORDER_PLACE_FAILED")
 
         self._pending_entries[order.client_order_id] = PendingEntry(
             proposal=proposal,
@@ -289,10 +322,10 @@ class ExecutionEngine:
                     fill_price = avg_price or proposal.entry_price
                     await self._finalize_entry(order.client_order_id, fill_qty, fill_price)
                     await self._cancel_order_safe(order, proposal.trade_id, "PARTIAL_FILL_TIMEOUT")
-                    return
+                    return EntryExecutionResult(placed=True, reason="PARTIAL_FILL_TIMEOUT")
                 else:
                     await self._cancel_order_safe(order, proposal.trade_id, status or "TIMEOUT")
-                    return
+                    return EntryExecutionResult(placed=True, reason="ORDER_TIMEOUT")
             else:
                 fill_qty = executed_qty or order.quantity
                 fill_price = avg_price or proposal.entry_price
@@ -330,7 +363,7 @@ class ExecutionEngine:
                 self._pending_entries.pop(order.client_order_id, None)
                 if self._state_store:
                     self._state_store.remove(order.client_order_id)
-                return
+                return EntryExecutionResult(placed=True, reason="SIMULATED_NO_FILL")
             if fill_result.is_partial:
                 # Partial fill in simulation
                 full_fill = False
@@ -351,7 +384,7 @@ class ExecutionEngine:
                 fill_qty = fill_result.fill_quantity
                 fill_price = fill_result.fill_price
                 await self._finalize_entry(order.client_order_id, fill_qty, fill_price)
-                return
+                return EntryExecutionResult(placed=True, reason="SIMULATED_PARTIAL_FILL")
             # Full fill
             fill_qty = fill_result.fill_quantity
             fill_price = fill_result.fill_price
@@ -381,7 +414,33 @@ class ExecutionEngine:
                 fill_payload,
                 {"source": "execution_engine", "trade_id": proposal.trade_id},
             )
-        return
+        return EntryExecutionResult(placed=True)
+
+    async def _skip_entry(
+        self,
+        proposal: TradeProposal,
+        reason: str,
+        details: dict[str, Any] | None = None,
+    ) -> EntryExecutionResult:
+        payload: dict[str, Any] = {
+            "symbol": proposal.symbol,
+            "trade_id": proposal.trade_id,
+            "reason": reason,
+        }
+        if details:
+            payload.update(details)
+        await self.event_bus.publish(
+            EventType.ENTRY_SKIPPED,
+            payload,
+            {"source": "execution_engine", "trade_id": proposal.trade_id},
+        )
+        self.log.info(
+            "entry_skipped",
+            symbol=proposal.symbol,
+            reason=reason,
+            trade_id=proposal.trade_id,
+        )
+        return EntryExecutionResult(placed=False, reason=reason)
 
     async def execute_exit(
         self,
@@ -1301,7 +1360,7 @@ class ExecutionEngine:
 
         try:
             ticker = await self.rest.get_book_ticker(proposal.symbol)
-        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        except (httpx.HTTPStatusError, httpx.RequestError, ValueError) as exc:
             self.log.warning("book_ticker_fetch_failed", symbol=proposal.symbol, error=str(exc))
             # Allow execution if we can't fetch ticker (fail open for safety)
             return True, None

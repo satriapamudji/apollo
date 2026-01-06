@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import calendar
 from typing import Any
 
 import feedparser
+import structlog
 
 from src.config.settings import NewsConfig, NewsSourceConfig
 
@@ -33,6 +35,7 @@ class NewsIngester:
     def __init__(self, config: NewsConfig) -> None:
         self.config = config
         self._seen: set[str] = set()
+        self._log = structlog.get_logger(__name__)
 
     def fetch(self) -> list[NewsItem]:
         items: list[NewsItem] = []
@@ -42,11 +45,42 @@ class NewsIngester:
             items.extend(self._fetch_source(source))
         return items
 
+    async def fetch_async(self) -> list[NewsItem]:
+        items: list[NewsItem] = []
+        for source in self.config.sources:
+            if not source.enabled:
+                continue
+            items.extend(await self._fetch_source_async(source))
+        return items
+
     def _fetch_source(self, source: NewsSourceConfig) -> list[NewsItem]:
+        try:
+            feed = feedparser.parse(source.url)
+        except Exception as exc:
+            self._log.warning("news_source_fetch_failed", source=source.name, error=str(exc))
+            return []
+        return self._items_from_feed(feed, source)
+
+    async def _fetch_source_async(self, source: NewsSourceConfig) -> list[NewsItem]:
+        timeout = self.config.source_timeout_sec
+        try:
+            feed = await asyncio.wait_for(
+                asyncio.to_thread(feedparser.parse, source.url),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            self._log.warning("news_source_timeout", source=source.name, timeout_sec=timeout)
+            return []
+        except Exception as exc:
+            self._log.warning("news_source_fetch_failed", source=source.name, error=str(exc))
+            return []
+        return self._items_from_feed(feed, source)
+
+    def _items_from_feed(self, feed: Any, source: NewsSourceConfig) -> list[NewsItem]:
         now = datetime.now(timezone.utc)
         results: list[NewsItem] = []
-        feed = feedparser.parse(source.url)
-        for entry in feed.entries:
+        entries = getattr(feed, "entries", []) or []
+        for entry in entries:
             published = self._parse_published(entry) or now
             if now - published > timedelta(hours=self.config.max_age_hours):
                 continue

@@ -62,6 +62,10 @@ class EventLedger:
         self._persist_sequence()
         return self._sequence
 
+    def last_sequence(self) -> int:
+        """Return the last known sequence number."""
+        return self._sequence
+
     def append(
         self,
         event_type: EventType,
@@ -82,12 +86,52 @@ class EventLedger:
     def iter_events(self) -> Iterable[Event]:
         """Iterate all events from the ledger."""
         if not self.events_file.exists():
-            return
-        with open(self.events_file, "rb") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                yield Event.from_dict(orjson.loads(line))
+            return iter(())
+
+        def _iter() -> Iterable[Event]:
+            with open(self.events_file, "rb") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    yield Event.from_dict(orjson.loads(line))
+
+        return _iter()
+
+    def iter_events_tail(self, limit: int) -> Iterable[Event]:
+        """Iterate the last N events without loading the full ledger."""
+        if limit <= 0 or not self.events_file.exists():
+            return iter(())
+        max_bytes = 1024 * 1024
+        chunk_size = 4096
+        file_size = self.events_file.stat().st_size
+        if file_size == 0:
+            return iter(())
+
+        def _iter_tail() -> Iterable[Event]:
+            buffer = b""
+            read_bytes = 0
+            with open(self.events_file, "rb") as handle:
+                while read_bytes < file_size and read_bytes < max_bytes:
+                    read_size = min(chunk_size, file_size - read_bytes)
+                    handle.seek(-(read_bytes + read_size), os.SEEK_END)
+                    data = handle.read(read_size)
+                    buffer = data + buffer
+                    read_bytes += read_size
+                    lines = buffer.splitlines()
+                    if len(lines) >= limit + 1 or read_bytes >= file_size:
+                        break
+                events: list[Event] = []
+                for line in buffer.splitlines()[-limit:]:
+                    if not line.strip():
+                        continue
+                    try:
+                        events.append(Event.from_dict(orjson.loads(line)))
+                    except orjson.JSONDecodeError:
+                        continue
+                for event in events:
+                    yield event
+
+        return _iter_tail()
 
     def load_all(self) -> list[Event]:
         """Load all events into memory."""

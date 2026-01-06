@@ -210,14 +210,22 @@ class LLMNewsClassifierAdapter:
     async def classify(self, item: NewsItem) -> NewsClassification:
         result = await self._llm.classify(item)
         payload = result.to_payload()
+        risk_level = str(payload.get("risk_level", "LOW")).upper()
+        if risk_level not in {"HIGH", "MEDIUM", "LOW"}:
+            risk_level = "LOW"
+        confidence = payload.get("confidence", 0.0)
+        try:
+            confidence_val = float(confidence) if confidence is not None else 0.0
+        except (TypeError, ValueError):
+            confidence_val = 0.0
         return NewsClassification(
             event_type=str(payload.get("event_type", "other")),
             symbols_mentioned=list(payload.get("symbols_mentioned", []) or []),
             exchanges_mentioned=list(payload.get("exchanges_mentioned", []) or []),
             sentiment=str(payload.get("sentiment", "neutral")),
-            risk_level=str(payload.get("risk_level", "LOW")),  # type: ignore[assignment]
+            risk_level=risk_level,  # type: ignore[assignment]
             risk_reason=payload.get("risk_reason"),
             matched_rules=list(payload.get("matched_rules", []) or []),
-            confidence=float(payload.get("confidence", 0.0) or 0.0),
+            confidence=confidence_val,
             summary=str(payload.get("summary", ""))[:200],
         )

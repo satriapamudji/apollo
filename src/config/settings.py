@@ -154,6 +154,8 @@ class UniverseConfig(BaseModel):
     max_min_notional_usd: float = Field(default=6.0, ge=1.0, le=100.0)
     max_funding_rate_pct: float = Field(default=0.1, ge=0.01, le=0.5)
     size: int = Field(default=5, ge=3, le=20)
+    refresh_interval_hours: int = Field(default=24, ge=1, le=168)
+    retry_interval_minutes: int = Field(default=5, ge=1, le=60)
 
 
 class NewsSourceConfig(BaseModel):
@@ -174,6 +176,7 @@ class NewsConfig(BaseModel):
     max_age_hours: int = Field(default=24, ge=1, le=72)
     high_risk_block_hours: int = Field(default=24, ge=6, le=72)
     medium_risk_block_hours: int = Field(default=6, ge=1, le=24)
+    source_timeout_sec: int = Field(default=10, ge=1, le=60)
     sources: list[NewsSourceConfig] = Field(default_factory=list)
 
 
@@ -215,6 +218,9 @@ class LLMConfig(BaseModel):
     max_tokens: int = Field(default=500, ge=100, le=2000)
     temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     rate_limit_per_minute: int = Field(default=10, ge=1, le=60)
+    request_timeout_sec: int = Field(default=20, ge=5, le=120)
+    retry_attempts: int = Field(default=2, ge=0, le=5)
+    retry_backoff_sec: float = Field(default=1.0, ge=0.1, le=10.0)
 
 
 class ExecutionConfig(BaseModel):
@@ -381,6 +387,8 @@ class MonitoringConfig(BaseModel):
     log_http: bool = False
     log_http_responses: bool = False
     log_http_max_body_chars: int = Field(default=500, ge=0, le=5000)
+    error_log_max_bytes: int = Field(default=5_000_000, ge=100_000, le=50_000_000)
+    error_log_backup_count: int = Field(default=3, ge=1, le=20)
 
 
 class ReconciliationConfig(BaseModel):
@@ -389,6 +397,7 @@ class ReconciliationConfig(BaseModel):
     enabled: bool = True
     interval_minutes: int = Field(default=30, ge=5, le=1440)
     failure_threshold: int = Field(default=3, ge=1, le=10)
+    allow_in_paper: bool = False
 
 
 class WatchdogConfig(BaseModel):
@@ -577,7 +586,8 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         config_data.setdefault("run", {}).update(run_overrides)
 
     # Build settings with config data as defaults
-    settings = Settings(**config_data)
+    env_path = config_file.parent / ".env"
+    settings = Settings(**config_data, _env_file=env_path)
 
     return settings
 
@@ -630,6 +640,8 @@ def create_default_config(path: str | Path = "config.yaml") -> None:
         "universe": {
             "min_quote_volume_usd": 50000000,
             "size": 5,
+            "refresh_interval_hours": 24,
+            "retry_interval_minutes": 5,
         },
         "news": {
             "enabled": True,
@@ -638,6 +650,7 @@ def create_default_config(path: str | Path = "config.yaml") -> None:
             "max_age_hours": 24,
             "high_risk_block_hours": 24,
             "medium_risk_block_hours": 6,
+            "source_timeout_sec": 10,
             "sources": [
                 {
                     "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
@@ -652,6 +665,9 @@ def create_default_config(path: str | Path = "config.yaml") -> None:
             "max_tokens": 500,
             "temperature": 0.1,
             "rate_limit_per_minute": 10,
+            "request_timeout_sec": 20,
+            "retry_attempts": 2,
+            "retry_backoff_sec": 1.0,
         },
         "execution": {
             "max_slippage_pct": 0.5,
@@ -677,11 +693,14 @@ def create_default_config(path: str | Path = "config.yaml") -> None:
             "log_http": False,
             "log_http_responses": False,
             "log_http_max_body_chars": 500,
+            "error_log_max_bytes": 5000000,
+            "error_log_backup_count": 3,
         },
         "reconciliation": {
             "enabled": True,
             "interval_minutes": 30,
             "failure_threshold": 3,
+            "allow_in_paper": False,
         },
     }
 
